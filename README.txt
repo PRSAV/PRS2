@@ -1,18 +1,12 @@
-PRS.AssetVerify 2.0.2 – QR/Barcode live-camera auto-fill patch
+PRS.AssetVerify 2.0.3 Mobile Scanner Fix
 
-Replace ONLY these GitHub PRS2 frontend files:
-- app.js
-- sw.js
+Replace only app.js and sw.js in the PRS2 GitHub repository.
+No Cloudflare/D1/R2 change is required.
 
-No Cloudflare Worker, D1, R2, or OpenAI changes are required.
-
-Behavior:
-1. Scan & Verify -> Start Camera
-2. Camera opens directly from the user tap (no temporary warm/open/close stream)
-3. First QR/barcode decoded is accepted automatically
-4. Scanner stops and verification form opens automatically
-5. Plain QR/barcode payload is populated into Barcode / QR / Asset Tag
-6. Structured QR key/value data still maps into matching fields
-
-Sample QR supplied by user decodes to:
-GDFPL/MAN/VKL/CBN/F&F/WC/027
+Changes:
+- iPhone/Android camera is requested directly from Start Camera.
+- Removed pre-camera GPS request.
+- Removed pre-start camera enumeration.
+- Uses full-frame ZXing decoder path through html5-qrcode.
+- Automatically stops after first scan and fills Barcode / QR / Asset Tag.
+- GPS starts after scan and remains optional.
