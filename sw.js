@@ -1,4 +1,4 @@
-const CACHE = 'prs-assetverify-2-0-2-scanner';
+const CACHE = 'prs-assetverify-2-0-3-qr-autofill';
 const CORE = [
   './',
   './index.html',

@@ -56,6 +56,7 @@ let aiSeq = 0;
 let activeStatus = 'ALL';
 let scanner = null;
 let scannerRunning = false;
+let scannerAutoProceed = false;
 let appendPhotoMode = false;
 let scanCodes = [];
 let scanEvidenceFiles = [];
@@ -591,14 +592,34 @@ function scannerRuntimeConfig(){
 
 function handleScannerDecoded(decoded){
   const value=String(decoded||'').trim();
-  if(!value||scanCodes.includes(value))return;
-  scanCodes.push(value);
-  try{navigator.vibrate?.(70)}catch{}
-  const parsed=parseScanPayload(value);
-  $('scanStatus').textContent=parsed.structured
-    ? 'Structured QR / barcode captured. Matching fields will be auto-filled when you continue.'
-    : `Captured ${scanCodes.length} unique code${scanCodes.length===1?'':'s'}. Barcode / Asset Tag will auto-fill.`;
+  if(!value || scannerAutoProceed) return;
+
+  // A successful scan is the final camera action. The first decoded value is
+  // immediately pushed into the verification form instead of asking the user
+  // to press another "Use code" button.
+  scannerAutoProceed=true;
+  scanCodes=[value];
+  $('manualScanCode').value=value;
   renderScanCodes();
+  try{navigator.vibrate?.(90)}catch{}
+
+  const parsed=parseScanPayload(value);
+  $('scanStatus').textContent=`QR / barcode detected: ${value}. Opening verification details…`;
+
+  // Let the user see the decoded value very briefly, then release the camera
+  // and continue automatically. prepareScanRecord() maps plain QR text into
+  // Barcode / QR / Asset Tag and maps structured QR keys into matching fields.
+  setTimeout(async()=>{
+    try{
+      await stopScanner({preserveStatus:true});
+      $('scannerModal').classList.add('hidden');
+      await prepareScanRecord([value],scanEvidenceFiles);
+    }catch(error){
+      console.error('Automatic scan continuation failed:',error);
+      scannerAutoProceed=false;
+      $('scanStatus').textContent='Code was read, but the verification form could not be opened. Tap Use Captured Code to continue.';
+    }
+  },220);
 }
 
 async function startScannerWithTarget(target){
@@ -608,15 +629,20 @@ async function startScannerWithTarget(target){
   }
   $('qrReader').innerHTML='';
   scanner=new Html5Qrcode('qrReader',scannerConfigOptions());
+
+  // Do NOT pre-open and close getUserMedia before this call. On iOS Safari
+  // and several Android devices that rapid release/reopen sequence can leave
+  // the camera temporarily busy and causes the previous "could not start"
+  // error. Html5Qrcode now owns the camera from the original user tap.
   await scanner.start(target,scannerRuntimeConfig(),handleScannerDecoded,()=>{});
 
-  // Helps iOS Safari keep the live preview inline rather than trying to take
-  // over the screen as a media player.
   const video=$('qrReader').querySelector('video');
   if(video){
     video.setAttribute('playsinline','true');
     video.setAttribute('webkit-playsinline','true');
     video.muted=true;
+    video.autoplay=true;
+    try{await video.play()}catch{}
   }
 }
 
@@ -640,28 +666,42 @@ async function startScanner(){
 
   const button=$('startScannerBtn');
   button.disabled=true;
-  button.textContent='Starting…';
-  $('scanStatus').textContent='Requesting camera permission…';
+  button.textContent='Opening Camera…';
+  $('scanStatus').textContent='Opening camera… Allow Camera permission if your browser asks.';
+  scannerAutoProceed=false;
 
   try{
     primeGpsCapture();
-    await warmCameraPermission();
 
-    $('scanStatus').textContent='Finding the best available camera…';
-    const devices=await availableScannerCameras();
-    const preferred=preferredScannerCamera(devices);
+    // Keep the whole operation attached to the Start Camera user gesture.
+    // First try the rear camera directly. We intentionally no longer open a
+    // temporary permission stream and close it before starting the scanner.
+    const attempts=[
+      {facingMode:{exact:'environment'}},
+      {facingMode:'environment'},
+      {facingMode:{ideal:'environment'}}
+    ];
 
-    const attempts=[];
-    if(preferred?.id)attempts.push(preferred.id);
-    // These constraints are deliberate fallbacks for Safari/Chrome variants.
-    attempts.push({facingMode:'environment'});
-    attempts.push({facingMode:{ideal:'environment'}});
+    // Device-id fallbacks help desktop Chrome, tablets and phones where the
+    // facingMode constraint is ignored or unsupported.
+    try{
+      const devices=await availableScannerCameras();
+      const preferred=preferredScannerCamera(devices);
+      if(preferred?.id)attempts.push(preferred.id);
+      for(const device of devices){
+        if(device?.id && device.id!==preferred?.id) attempts.push(device.id);
+      }
+    }catch{}
+
+    // Final fallback: any camera.
     attempts.push({facingMode:'user'});
 
+    let started=false;
     let lastError=null;
     for(const target of attempts){
       try{
         await startScannerWithTarget(target);
+        started=true;
         lastError=null;
         break;
       }catch(error){
@@ -669,20 +709,20 @@ async function startScanner(){
         console.warn('Scanner camera attempt failed:',target,error);
         try{await scanner?.clear()}catch{}
         scanner=null;
+        $('qrReader').innerHTML='';
       }
     }
 
-    if(lastError)throw lastError;
+    if(!started) throw lastError || new Error('No camera configuration could be started.');
 
     scannerRunning=true;
     button.disabled=false;
     button.textContent='Stop Camera';
-    if(!scanCodes.length){
-      $('scanStatus').textContent='Camera started. Point it at a QR code or barcode and hold steady.';
-    }
+    $('scanStatus').textContent='Camera is live. Point it at one QR code or barcode; the decoded text will be filled automatically.';
   }catch(error){
     console.error('Camera scanner start failed:',error);
     scannerRunning=false;
+    scannerAutoProceed=false;
     try{await scanner?.clear()}catch{}
     scanner=null;
     $('qrReader').innerHTML='';
@@ -692,7 +732,7 @@ async function startScanner(){
   }
 }
 
-async function stopScanner(){
+async function stopScanner(options={}){
   const button=$('startScannerBtn');
   try{
     if(scanner){
@@ -709,7 +749,7 @@ async function stopScanner(){
       button.disabled=false;
       button.textContent='Start Camera';
     }
-    if(!$('scannerModal').classList.contains('hidden')){
+    if(!options.preserveStatus && !$('scannerModal').classList.contains('hidden')){
       $('scanStatus').textContent=scanCodes.length
         ? `${scanCodes.length} code${scanCodes.length===1?'':'s'} captured. You can scan again or continue.`
         : 'Camera stopped. Tap Start Camera to scan again.';
@@ -718,11 +758,12 @@ async function stopScanner(){
 }
 
 async function closeScanner(){
+  scannerAutoProceed=false;
   await stopScanner();
   $('scannerModal').classList.add('hidden');
 }
 async function prepareScanRecord(codes,evidenceFiles=[]){
-  toast('Preparing scan verification and auto-filling recognised fields…',3200);
+  toast('QR / barcode read. Auto-filling verification fields…',2800);
   try{
     const photos=await compressFiles(evidenceFiles,'scan-image');
     const d=new Date(),joined=codes.join(' | '),first=photos[0],captureToken=uid();
@@ -734,7 +775,7 @@ async function prepareScanRecord(codes,evidenceFiles=[]){
     renderPendingPhotoPreview();
     $('scanOnlyPreview').classList.remove('hidden');$('scanOnlyCode').textContent=joined;$('retryAiBtn').classList.add('hidden');
     const filledCount=Object.keys(mapped.sticky).length+Object.keys(mapped.variable).length+assets.reduce((n,a)=>n+[a.assetName,a.serialNumber,a.barcode].filter(Boolean).length,0);
-    $('aiStatus').textContent=filledCount?`Scanner auto-filled ${filledCount} recognised value${filledCount===1?'':'s'}. Review them before saving.`:'Code captured. Plain barcodes are placed in Barcode / QR / Asset Tag automatically.';
+    $('aiStatus').textContent=filledCount?`Scanner auto-filled ${filledCount} recognised value${filledCount===1?'':'s'}. Review them before saving.`:'QR / barcode text captured and placed in Barcode / QR / Asset Tag automatically.';
     setCaptureDateTime(d);$('latitude').value='';$('longitude').value='';$('gpsAccuracy').value='';
     $('gpsNote').textContent='GPS detection started automatically. Latitude, Longitude and GPS Accuracy are optional.';
     renderCaptureStickyFields(mapped.sticky);
@@ -743,7 +784,7 @@ async function prepareScanRecord(codes,evidenceFiles=[]){
     openPendingDetailStep1();
     updateGuidedCaptureFlow(false);
     pendingRecord.gpsPromise=captureGpsForPendingRecord(captureToken);
-  }catch(e){console.error(e);toast('Could not prepare scan verification. Please try again.',4200)}
+  }catch(e){console.error(e);scannerAutoProceed=false;toast('Could not prepare scan verification. Please try again.',4200)}
 }
 
 // ---------- Records ----------
