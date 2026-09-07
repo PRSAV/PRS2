@@ -489,10 +489,238 @@ function renderScanCodes(){const manual=$('manualScanCode').value.trim();const a
 $('scanVerifyBtn').onclick=()=>{primeGpsCapture();openScanner()};$('closeScannerBtn').onclick=closeScanner;$('startScannerBtn').onclick=startScanner;$('scanImageBtn').onclick=()=>$('scanImageInput').click();$('manualScanCode').addEventListener('input',renderScanCodes);
 $('scanImageInput').onchange=async e=>{const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;if(!window.Html5Qrcode){toast('Scanner library is unavailable.');return}scanEvidenceFiles=[...scanEvidenceFiles,...files].slice(0,12);let found=0;const qr=new Html5Qrcode('qrReader',scannerConfigOptions());for(const f of files){try{const code=await qr.scanFile(f,true);if(code&&!scanCodes.includes(code)){scanCodes.push(code);found++}}catch{}}try{await qr.clear()}catch{}renderScanCodes();$('scanStatus').textContent=found?`${found} new code${found===1?'':'s'} detected from ${files.length} image${files.length===1?'':'s'}.`:`No new readable barcode / QR found in ${files.length} image${files.length===1?'':'s'}.`};
 $('useScanCodeBtn').onclick=async()=>{const manual=$('manualScanCode').value.trim();const codes=[...new Set([...scanCodes,...(manual?[manual]:[])])];if(!codes.length){toast('Scan or enter at least one code first.');return}await closeScanner();await prepareScanRecord(codes,scanEvidenceFiles)};
-function openScanner(){if(!hasPermission('verification.scan'))return;scanCodes=[];scanEvidenceFiles=[];$('manualScanCode').value='';$('scanStatus').textContent='';renderScanCodes();$('scannerModal').classList.remove('hidden')}
-async function startScanner(){if(scannerRunning)return;if(!window.Html5Qrcode){toast('Scanner library is unavailable.');return}try{primeGpsCapture();scanner=new Html5Qrcode('qrReader',scannerConfigOptions());scannerRunning=true;$('scanStatus').textContent='Starting rear camera…';await scanner.start({facingMode:{ideal:'environment'}},{fps:10,qrbox:{width:280,height:180},aspectRatio:1.777778,disableFlip:false},decoded=>{if(decoded&&!scanCodes.includes(decoded)){scanCodes.push(decoded);const parsed=parseScanPayload(decoded);$('scanStatus').textContent=parsed.structured?'Structured QR / barcode captured. Matching fields will be auto-filled when you continue.':`Captured ${scanCodes.length} unique code${scanCodes.length===1?'':'s'}. Barcode / Asset Tag will auto-fill.`;renderScanCodes()}},()=>{});if(!scanCodes.length)$('scanStatus').textContent='Point the rear camera at QR, Code 128, EAN, UPC, Data Matrix or other supported codes.'}catch(e){scannerRunning=false;$('scanStatus').textContent=`Camera scanner could not start. You can use Scan Image or enter the code manually. ${e?.message||e}`}}
-async function stopScanner(){if(scanner&&scannerRunning){try{await scanner.stop();await scanner.clear()}catch{}scannerRunning=false;scanner=null}}
-async function closeScanner(){await stopScanner();$('scannerModal').classList.add('hidden')}
+function openScanner(){
+  if(!hasPermission('verification.scan'))return;
+  scanCodes=[];
+  scanEvidenceFiles=[];
+  $('manualScanCode').value='';
+  $('scanStatus').textContent='Camera is ready to start. On iPhone / Android, allow camera access when asked.';
+  renderScanCodes();
+  $('scannerModal').classList.remove('hidden');
+  $('startScannerBtn').textContent='Start Camera';
+  $('startScannerBtn').disabled=false;
+}
+
+function cameraErrorMessage(error){
+  const name=String(error?.name||'');
+  const message=String(error?.message||'');
+  if(name==='NotAllowedError'||name==='PermissionDeniedError'){
+    return 'Camera permission is blocked. Allow Camera access for this website in your browser settings, then tap Start Camera again.';
+  }
+  if(name==='NotFoundError'||name==='DevicesNotFoundError'){
+    return 'No usable camera was found on this device.';
+  }
+  if(name==='NotReadableError'||name==='TrackStartError'){
+    return 'The camera is busy in another app or browser tab. Close the other camera app and try again.';
+  }
+  if(name==='OverconstrainedError'||name==='ConstraintNotSatisfiedError'){
+    return 'The requested rear-camera mode is not available. PRS will retry with another camera.';
+  }
+  if(name==='SecurityError'){
+    return 'The browser blocked camera access. Open PRS.AssetVerify over HTTPS and allow Camera permission.';
+  }
+  return message||name||'Unknown camera error';
+}
+
+async function warmCameraPermission(){
+  if(!navigator.mediaDevices?.getUserMedia){
+    throw new Error('This browser does not provide camera access.');
+  }
+
+  let stream=null;
+  try{
+    // First preference: rear/environment camera. This also prompts for permission
+    // while the request is still directly connected to the user tap.
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({
+        audio:false,
+        video:{
+          facingMode:{ideal:'environment'},
+          width:{ideal:1280},
+          height:{ideal:720}
+        }
+      });
+    }catch(firstError){
+      // Desktops, some iPads and older Safari versions may not expose an
+      // environment-facing camera. Fall back to any available camera.
+      if(firstError?.name==='NotAllowedError'||firstError?.name==='PermissionDeniedError')throw firstError;
+      stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});
+    }
+    return true;
+  }finally{
+    if(stream){
+      for(const track of stream.getTracks()){
+        try{track.stop()}catch{}
+      }
+    }
+  }
+}
+
+async function availableScannerCameras(){
+  try{
+    const devices=await Html5Qrcode.getCameras();
+    return Array.isArray(devices)?devices:[];
+  }catch(error){
+    console.warn('Camera enumeration failed:',error);
+    return [];
+  }
+}
+
+function preferredScannerCamera(devices){
+  if(!devices?.length)return null;
+  const rearPattern=/back|rear|environment|world|traseira|trasera|arriere|hinten/i;
+  const rear=devices.find(d=>rearPattern.test(String(d.label||'')));
+  if(rear)return rear;
+
+  // Mobile browsers frequently list the rear camera after the selfie camera
+  // even when labels are hidden. Desktop browsers generally have only one.
+  const mobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent||'');
+  return mobile?devices[devices.length-1]:devices[0];
+}
+
+function scannerRuntimeConfig(){
+  const boxSize=Math.max(180,Math.min(300,Math.floor((window.innerWidth||360)*0.72)));
+  return {
+    fps:12,
+    qrbox:{width:boxSize,height:Math.max(150,Math.floor(boxSize*0.64))},
+    aspectRatio:1.777778,
+    disableFlip:false,
+    experimentalFeatures:{useBarCodeDetectorIfSupported:true}
+  };
+}
+
+function handleScannerDecoded(decoded){
+  const value=String(decoded||'').trim();
+  if(!value||scanCodes.includes(value))return;
+  scanCodes.push(value);
+  try{navigator.vibrate?.(70)}catch{}
+  const parsed=parseScanPayload(value);
+  $('scanStatus').textContent=parsed.structured
+    ? 'Structured QR / barcode captured. Matching fields will be auto-filled when you continue.'
+    : `Captured ${scanCodes.length} unique code${scanCodes.length===1?'':'s'}. Barcode / Asset Tag will auto-fill.`;
+  renderScanCodes();
+}
+
+async function startScannerWithTarget(target){
+  if(scanner){
+    try{await scanner.clear()}catch{}
+    scanner=null;
+  }
+  $('qrReader').innerHTML='';
+  scanner=new Html5Qrcode('qrReader',scannerConfigOptions());
+  await scanner.start(target,scannerRuntimeConfig(),handleScannerDecoded,()=>{});
+
+  // Helps iOS Safari keep the live preview inline rather than trying to take
+  // over the screen as a media player.
+  const video=$('qrReader').querySelector('video');
+  if(video){
+    video.setAttribute('playsinline','true');
+    video.setAttribute('webkit-playsinline','true');
+    video.muted=true;
+  }
+}
+
+async function startScanner(){
+  if(scannerRunning){
+    await stopScanner();
+    return;
+  }
+  if(!window.isSecureContext){
+    $('scanStatus').textContent='Camera access requires HTTPS. Open PRS.AssetVerify from its GitHub Pages HTTPS address.';
+    return;
+  }
+  if(!window.Html5Qrcode){
+    toast('Scanner library is unavailable. Reload the page and try again.',4200);
+    return;
+  }
+  if(!navigator.mediaDevices?.getUserMedia){
+    $('scanStatus').textContent='This browser does not expose camera access. You can still use Scan Image or enter the code manually.';
+    return;
+  }
+
+  const button=$('startScannerBtn');
+  button.disabled=true;
+  button.textContent='Starting…';
+  $('scanStatus').textContent='Requesting camera permission…';
+
+  try{
+    primeGpsCapture();
+    await warmCameraPermission();
+
+    $('scanStatus').textContent='Finding the best available camera…';
+    const devices=await availableScannerCameras();
+    const preferred=preferredScannerCamera(devices);
+
+    const attempts=[];
+    if(preferred?.id)attempts.push(preferred.id);
+    // These constraints are deliberate fallbacks for Safari/Chrome variants.
+    attempts.push({facingMode:'environment'});
+    attempts.push({facingMode:{ideal:'environment'}});
+    attempts.push({facingMode:'user'});
+
+    let lastError=null;
+    for(const target of attempts){
+      try{
+        await startScannerWithTarget(target);
+        lastError=null;
+        break;
+      }catch(error){
+        lastError=error;
+        console.warn('Scanner camera attempt failed:',target,error);
+        try{await scanner?.clear()}catch{}
+        scanner=null;
+      }
+    }
+
+    if(lastError)throw lastError;
+
+    scannerRunning=true;
+    button.disabled=false;
+    button.textContent='Stop Camera';
+    if(!scanCodes.length){
+      $('scanStatus').textContent='Camera started. Point it at a QR code or barcode and hold steady.';
+    }
+  }catch(error){
+    console.error('Camera scanner start failed:',error);
+    scannerRunning=false;
+    try{await scanner?.clear()}catch{}
+    scanner=null;
+    $('qrReader').innerHTML='';
+    button.disabled=false;
+    button.textContent='Start Camera';
+    $('scanStatus').textContent=`Camera scanner could not start. ${cameraErrorMessage(error)} You can also use Scan Image or enter the code manually.`;
+  }
+}
+
+async function stopScanner(){
+  const button=$('startScannerBtn');
+  try{
+    if(scanner){
+      if(scannerRunning){
+        try{await scanner.stop()}catch{}
+      }
+      try{await scanner.clear()}catch{}
+    }
+  }finally{
+    scannerRunning=false;
+    scanner=null;
+    $('qrReader').innerHTML='';
+    if(button){
+      button.disabled=false;
+      button.textContent='Start Camera';
+    }
+    if(!$('scannerModal').classList.contains('hidden')){
+      $('scanStatus').textContent=scanCodes.length
+        ? `${scanCodes.length} code${scanCodes.length===1?'':'s'} captured. You can scan again or continue.`
+        : 'Camera stopped. Tap Start Camera to scan again.';
+    }
+  }
+}
+
+async function closeScanner(){
+  await stopScanner();
+  $('scannerModal').classList.add('hidden');
+}
 async function prepareScanRecord(codes,evidenceFiles=[]){
   toast('Preparing scan verification and auto-filling recognised fields…',3200);
   try{
