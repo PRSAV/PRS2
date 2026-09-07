@@ -283,35 +283,74 @@ function wireAssetRows(container){container.querySelectorAll('.remove-asset').fo
 function renderAssetRows(list,edit=false){const c=$(edit?'editAssetRows':'assetRows');c.innerHTML=(list?.length?list:[assetDefault()]).map(a=>assetRowHtml(a,edit)).join('');wireAssetRows(c)}
 function collectAssetRows(edit=false){const p=edit?'e-':'';return [...$(edit?'editAssetRows':'assetRows').querySelectorAll('.asset-row')].map(r=>({rowId:r.dataset.row||uid(),assetName:r.querySelector(`.${p}asset-name`).value.trim(),quantity:Math.max(1,Number(r.querySelector(`.${p}qty`).value)||1),condition:r.querySelector(`.${p}condition`).value,verificationStatus:r.querySelector(`.${p}status`).value,notFoundReason:r.querySelector(`.${p}reason`).value,serialNumber:r.querySelector(`.${p}serial`).value.trim(),barcode:r.querySelector(`.${p}barcode`).value.trim()})).filter(a=>a.assetName)}
 async function fileToDataUrl(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file)})}
-async function compressPhoto(file){
-  const src=await fileToDataUrl(file);
-  const img=await new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=()=>reject(new Error('This image format could not be decoded on this device.'));i.src=src});
-  let w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;
-  const maxDimension=1600,targetBytes=650*1024,minDimension=720;
-  if(Math.max(w,h)>maxDimension){const scale=maxDimension/Math.max(w,h);w=Math.max(1,Math.round(w*scale));h=Math.max(1,Math.round(h*scale))}
-  let quality=.80,blob=null;
-  for(let pass=0;pass<12;pass++){
-    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
-    const ctx=canvas.getContext('2d',{alpha:false});if(!ctx)throw new Error('Image compression is unavailable on this browser.');
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(img,0,0,w,h);
-    blob=await new Promise(res=>canvas.toBlob(res,'image/jpeg',quality));
-    if(!blob)throw new Error('Image compression failed.');
-    if(blob.size<=targetBytes||Math.max(w,h)<=minDimension)break;
-    if(quality>.48)quality-=.08;else{w=Math.max(1,Math.round(w*.86));h=Math.max(1,Math.round(h*.86));quality=.68}
-  }
-  return {dataUrl:await blobToDataUrl(blob),size:blob.size,width:w,height:h,compressed:true};
-}
 function blobToDataUrl(blob){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(blob)})}
+async function decodePhotoSource(file){
+  // Avoid turning the original camera photo into a huge base64 string before
+  // compression. This materially lowers memory pressure on iPhone/Android.
+  if(typeof createImageBitmap==='function'){
+    try{
+      const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'});
+      return {image:bitmap,width:bitmap.width,height:bitmap.height,cleanup:()=>{try{bitmap.close?.()}catch{}}};
+    }catch{}
+  }
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=()=>reject(new Error('This image format could not be decoded on this device.'));i.src=url});
+    return {image:img,width:img.naturalWidth||img.width,height:img.naturalHeight||img.height,cleanup:()=>URL.revokeObjectURL(url)};
+  }catch(e){URL.revokeObjectURL(url);throw e}
+}
+async function compressPhoto(file){
+  const decoded=await decodePhotoSource(file);
+  try{
+    let w=decoded.width,h=decoded.height;
+    const maxDimension=1440,targetBytes=560*1024,minDimension=720;
+    if(Math.max(w,h)>maxDimension){const scale=maxDimension/Math.max(w,h);w=Math.max(1,Math.round(w*scale));h=Math.max(1,Math.round(h*scale))}
+    let quality=.80,blob=null;
+    const canvas=document.createElement('canvas');
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)throw new Error('Image compression is unavailable on this browser.');
+    for(let pass=0;pass<10;pass++){
+      canvas.width=w;canvas.height=h;
+      ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(decoded.image,0,0,w,h);
+      blob=await new Promise(res=>canvas.toBlob(res,'image/jpeg',quality));
+      if(!blob)throw new Error('Image compression failed.');
+      if(blob.size<=targetBytes||Math.max(w,h)<=minDimension)break;
+      if(quality>.52)quality-=.08;else{w=Math.max(1,Math.round(w*.86));h=Math.max(1,Math.round(h*.86));quality=.68}
+      // Yield briefly so mobile Safari/Chrome can repaint and avoid a long CPU lock.
+      await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    canvas.width=1;canvas.height=1;
+    return {dataUrl:await blobToDataUrl(blob),size:blob.size,width:w,height:h,compressed:true};
+  }finally{decoded.cleanup?.()}
+}
 
 function stickySnapshotText(sticky){return fields.sticky.map(f=>`${f.label}: ${sticky[f.id]||'—'}`).join(' · ')}
 function setCaptureDateTime(iso){const d=new Date(iso);$('capturedDateInput').value=isoDateInput(d);$('capturedTimeInput').value=timeInput(d)}
 
-$('takePhotoBtn').onclick=()=>{if(!hasPermission('verification.capture_photo'))return;appendPhotoMode=false;primeGpsCapture();$('cameraInput').click()};
-$('uploadPhotoBtn').onclick=()=>{if(!hasPermission('verification.upload_gallery'))return;appendPhotoMode=false;primeGpsCapture();$('galleryInput').click()};
-$('addCameraPhotoBtn').onclick=()=>{appendPhotoMode=true;primeGpsCapture();$('cameraInput').click()};
-$('addGalleryPhotosBtn').onclick=()=>{appendPhotoMode=true;$('galleryInput').click()};
-$('cameraInput').onchange=async e=>{const files=[...(e.target.files||[])];e.target.value='';if(appendPhotoMode)await appendPendingPhotos(files,'camera');else await preparePhotos(files,'camera')};
-$('galleryInput').onchange=async e=>{const files=[...(e.target.files||[])];e.target.value='';if(appendPhotoMode)await appendPendingPhotos(files,'gallery');else await preparePhotos(files,'gallery')};
+let nativeCaptureBusy=false;
+function releaseScannerForNativeCapture(){
+  // Synchronous cleanup preserves the user's tap gesture, which is important
+  // because iOS/Android may refuse to open a file/camera picker after an await.
+  clearTimeout(scannerLoopTimer);scannerLoopTimer=null;
+  scannerRunning=false;scannerScanBusy=false;scannerDetector=null;
+  stopTracksSynchronously();
+  if(scannerCanvas){try{scannerCanvas.width=1;scannerCanvas.height=1}catch{};scannerCanvas=null}
+}
+function openNativeCapture(input,{append=false}={}){
+  if(nativeCaptureBusy)return;
+  nativeCaptureBusy=true;appendPhotoMode=append;
+  releaseScannerForNativeCapture();
+  try{input.value=''}catch{}
+  // Camera/gallery click must be the first real browser action from this tap.
+  input.click();
+  setTimeout(()=>{nativeCaptureBusy=false},900);
+}
+$('takePhotoBtn').onclick=()=>{if(!hasPermission('verification.capture_photo'))return;openNativeCapture($('cameraInput'),{append:false})};
+$('uploadPhotoBtn').onclick=()=>{if(!hasPermission('verification.upload_gallery'))return;openNativeCapture($('galleryInput'),{append:false})};
+$('addCameraPhotoBtn').onclick=()=>openNativeCapture($('cameraInput'),{append:true});
+$('addGalleryPhotosBtn').onclick=()=>openNativeCapture($('galleryInput'),{append:true});
+$('cameraInput').onchange=async e=>{nativeCaptureBusy=false;const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;if(appendPhotoMode)await appendPendingPhotos(files,'camera');else await preparePhotos(files,'camera')};
+$('galleryInput').onchange=async e=>{nativeCaptureBusy=false;const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;if(appendPhotoMode)await appendPendingPhotos(files,'gallery');else await preparePhotos(files,'gallery')};
 
 async function compressFiles(files,source){const list=[...(files||[])].filter(Boolean).slice(0,12);const out=[];for(const file of list){const c=await compressPhoto(file);out.push({id:uid(),dataUrl:c.dataUrl,size:c.size,name:file.name||'photo.jpg',source})}return out}
 function renderPendingPhotoPreview(){const photos=pendingRecord?.photos||[];const has=photos.length>0;$('photoPreviewArea').classList.toggle('hidden',!has);$('photoPreview').classList.toggle('hidden',!has);if(has)$('photoPreview').src=photos[0].dataUrl;$('photoThumbs').innerHTML=photos.map((p,i)=>`<div class="photo-thumb ${i===0?'active':''}"><img src="${p.dataUrl}" alt="Photo ${i+1}"><button type="button" data-remove-pending-photo="${p.id}" aria-label="Remove photo">✕</button><span>${i+1}</span></div>`).join('');document.querySelectorAll('[data-remove-pending-photo]').forEach(b=>b.onclick=()=>{if(!pendingRecord)return;pendingRecord.photos=pendingRecord.photos.filter(p=>String(p.id)!==String(b.dataset.removePendingPhoto));const first=pendingRecord.photos[0];pendingRecord.dataUrl=first?.dataUrl||null;pendingRecord.size=pendingRecord.photos.reduce((n,p)=>n+(p.size||0),0);pendingRecord.photoName=first?.name||'';renderPendingPhotoPreview()})}
@@ -662,7 +701,7 @@ async function captureScannerEvidenceFile(){
   if(!video||video.readyState<2||!video.videoWidth||!video.videoHeight)return null;
   try{
     const srcW=video.videoWidth,srcH=video.videoHeight;
-    const maxSide=1920;
+    const maxSide=1280;
     const scale=Math.min(1,maxSide/Math.max(srcW,srcH));
     const w=Math.max(1,Math.round(srcW*scale));
     const h=Math.max(1,Math.round(srcH*scale));
@@ -672,7 +711,7 @@ async function captureScannerEvidenceFile(){
     if(!ctx)return null;
     ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
     ctx.drawImage(video,0,0,w,h);
-    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.88));
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.78));
     if(!blob)return null;
     const name=`scan-${new Date().toISOString().replace(/[:.]/g,'-')}.jpg`;
     try{return new File([blob],name,{type:'image/jpeg',lastModified:Date.now()})}
@@ -780,8 +819,8 @@ function scannerCrop(video,contrast=false){
   const cropW=Math.max(1,Math.floor(vw*0.72));
   const cropH=Math.max(1,Math.floor(vh*0.72));
   const sx=Math.floor((vw-cropW)/2),sy=Math.floor((vh-cropH)/2);
-  const maxSide=1100;
-  const scale=Math.min(maxSide/cropW,maxSide/cropH,2.2);
+  const maxSide=900;
+  const scale=Math.min(maxSide/cropW,maxSide/cropH,1.8);
   const outW=Math.max(320,Math.floor(cropW*scale));
   const outH=Math.max(320,Math.floor(cropH*scale));
   scannerCanvas.width=outW;
@@ -797,27 +836,27 @@ function scannerCrop(video,contrast=false){
 async function scanOneLiveFrame(){
   if(!scannerRunning||scannerScanBusy||scannerAutoProceed)return;
   const video=$('prsMobileScanVideo');
-  if(!video||video.readyState<2||!video.videoWidth){return}
+  if(!video||video.readyState<2||!video.videoWidth)return;
   scannerScanBusy=true;
   scannerFrameCount++;
   try{
-    // Pass 1: full live frame.
-    let value=await detectWithScannerDetector(video);
-    // Pass 2: centre crop enlarged in canvas. This is especially useful for
-    // small QR stickers that occupy only a small part of an iPhone frame.
-    if(!value){
-      const crop=scannerCrop(video,false);
-      if(crop)value=await detectWithScannerDetector(crop);
-    }
-    // Pass 3 every third frame: contrast-enhanced centre crop.
-    if(!value&&scannerFrameCount%3===0){
-      const crop=scannerCrop(video,true);
-      if(crop)value=await detectWithScannerDetector(crop);
+    // Mobile stability: decode the smaller centre crop first. Running the WASM
+    // decoder against a full 1080p frame many times per second can spike CPU /
+    // memory and make Safari/Chrome terminate or stall camera work.
+    let value='';
+    const crop=scannerCrop(video,false);
+    if(crop)value=await detectWithScannerDetector(crop);
+    // Full frame only periodically in case the code is slightly outside centre.
+    if(!value&&scannerFrameCount%4===0)value=await detectWithScannerDetector(video);
+    // Contrast pass is useful, but expensive; run it only every sixth frame.
+    if(!value&&scannerFrameCount%6===0){
+      const contrastCrop=scannerCrop(video,true);
+      if(contrastCrop)value=await detectWithScannerDetector(contrastCrop);
     }
     if(value){handleScannerDecoded(value);return}
 
     const elapsed=(Date.now()-scannerStartedAt)/1000;
-    if(scannerFrameCount%12===0&&!scannerAutoProceed){
+    if(scannerFrameCount%10===0&&!scannerAutoProceed){
       $('scanStatus').textContent=elapsed>8
         ?'Camera is scanning continuously. Move the QR closer until it fills roughly one-third of the box and hold steady.'
         :`Camera live • scanning… (${scannerFrameCount} frames analysed)`;
@@ -829,12 +868,12 @@ async function scanOneLiveFrame(){
   }
 }
 
-function scheduleScannerLoop(delay=120){
+function scheduleScannerLoop(delay=170){
   clearTimeout(scannerLoopTimer);
   if(!scannerRunning)return;
   scannerLoopTimer=setTimeout(async()=>{
     await scanOneLiveFrame();
-    scheduleScannerLoop(120);
+    scheduleScannerLoop(170);
   },delay);
 }
 
@@ -871,9 +910,9 @@ async function startScanner(){
       audio:false,
       video:{
         facingMode:{ideal:'environment'},
-        width:{ideal:1920},
-        height:{ideal:1080},
-        frameRate:{ideal:30,max:30}
+        width:{ideal:1280},
+        height:{ideal:720},
+        frameRate:{ideal:24,max:30}
       }
     };
     stream=await navigator.mediaDevices.getUserMedia(constraints);
@@ -895,7 +934,7 @@ async function startScanner(){
     button.disabled=false;
     button.textContent='Stop Camera';
     $('scanStatus').textContent='Camera is live and scanning automatically. Hold the QR / barcode steady inside the box.';
-    scheduleScannerLoop(80);
+    scheduleScannerLoop(140);
   }catch(error){
     console.error('Mobile scanner start failed:',error);
     scannerRunning=false;
@@ -920,6 +959,7 @@ async function stopScanner(options={}){
   scannerScanBusy=false;
   scannerDetector=null;
   stopTracksSynchronously();
+  if(scannerCanvas){try{scannerCanvas.width=1;scannerCanvas.height=1}catch{};scannerCanvas=null}
   $('qrReader').innerHTML='';
   if(button){button.disabled=false;button.textContent='Start Camera'}
   if(!options.preserveStatus&&!$('scannerModal').classList.contains('hidden')){
@@ -934,6 +974,15 @@ async function closeScanner(){
   await stopScanner();
   $('scannerModal').classList.add('hidden');
 }
+
+// Release live scanner resources if the browser/app is backgrounded or the page is closed.
+window.addEventListener('pagehide',()=>{try{releaseScannerForNativeCapture()}catch{}});
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden'&&scannerRunning){
+    // A hidden scanning page should not keep the camera/decoder alive.
+    try{releaseScannerForNativeCapture()}catch{}
+  }
+});
 
 async function prepareScanRecord(codes,evidenceFiles=[]){
   toast('QR / barcode read. Auto-filling verification fields…',2800);
@@ -1077,23 +1126,63 @@ async function addVerificationSheet(wb,name,subset,{withPhotos=false,currentSche
   const standards=exportColumnList(!currentSchema).filter(c=>c.key!=='photo');
   const photoEnabled=withPhotos&&exportColumnList(!currentSchema).some(c=>c.key==='photo'&&(c.active||c.locked));
   const maxPhotos=photoEnabled?Math.min(12,Math.max(1,...subset.map(r=>currentPhotoUrls(r).length))):0;
-  const photoCols=Array.from({length:maxPhotos},(_,i)=>({header:`Photo ${i+1}`,key:`photo_${i}`,width:24}));
-  const stdCols=standards.map(c=>({header:c.label,key:`std_${c.key}`,width:['company','assetName','scanCode','barcode'].includes(c.key)?28:16,column:c}));
+
+  // Version-1-style layout: Sr No first, then Photo column(s), then the rest.
+  // This fixes the 2.x anchor bug where images were drawn one column to the
+  // right of their Photo headers.
+  const srDef=standards.find(c=>c.key==='srNo')||null;
+  const otherStandards=standards.filter(c=>c.key!=='srNo');
+  const srCols=srDef?[{header:srDef.label,key:'std_srNo',width:8,column:srDef}]:[];
+  const photoCols=Array.from({length:maxPhotos},(_,i)=>({header:maxPhotos===1?'Photo':`Photo ${i+1}`,key:`photo_${i}`,width:24}));
+  const stdCols=otherStandards.map(c=>({header:c.label,key:`std_${c.key}`,width:['company','assetName','scanCode','barcode'].includes(c.key)?28:16,column:c}));
   const dynCols=allDefs.map((f,i)=>({header:f.exportHeader,key:`dyn_${i}`,width:20,field:f}));
-  ws.columns=[...photoCols,...stdCols,...dynCols];
-  ws.views=[{state:'frozen',ySplit:1}];ws.getRow(1).font={bold:true};ws.autoFilter={from:{row:1,column:1},to:{row:1,column:ws.columns.length}};
+  ws.columns=[...srCols,...photoCols,...stdCols,...dynCols];
+  ws.views=[{state:'frozen',ySplit:1}];
+  ws.getRow(1).font={bold:true};
+  ws.getRow(1).alignment={vertical:'middle',horizontal:'center',wrapText:true};
+  ws.getRow(1).height=24;
+  ws.autoFilter={from:{row:1,column:1},to:{row:1,column:ws.columns.length}};
+
+  const photoStartCol=srCols.length; // zero-based ExcelJS drawing coordinate
   let sr=0,rowNo=2,embedded=0,failed=0;
   for(const r of subset){
     const assets=(r.assets&&r.assets.length)?r.assets:[{}];
     let photoIds=[];
     if(photoEnabled){
       const urls=currentPhotoUrls(r).slice(0,maxPhotos);
-      for(const u of urls){try{const data=await urlToBase64(u);const match=String(data).match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i);if(!match)throw new Error('Unsupported image format');const ext=match[1].toLowerCase()==='png'?'png':'jpeg';photoIds.push(wb.addImage({base64:match[2],extension:ext}));embedded++}catch(e){console.error('Excel photo embed failed:',e);photoIds.push(null);failed++}}
+      for(const u of urls){
+        try{
+          const data=await urlToBase64(u);
+          const match=String(data).match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i);
+          if(!match)throw new Error('Unsupported image format');
+          const ext=match[1].toLowerCase()==='png'?'png':'jpeg';
+          photoIds.push(wb.addImage({base64:match[2],extension:ext}));embedded++;
+        }catch(e){console.error('Excel photo embed failed:',e);photoIds.push(null);failed++}
+      }
     }
+
     for(let ai=0;ai<assets.length;ai++){
-      const a=assets[ai];sr++;const obj={};standards.forEach(c=>obj[`std_${c.key}`]=c.key==='srNo'?sr:standardExportValue(c.key,r,a));allDefs.forEach((f,i)=>obj[`dyn_${i}`]=dynamicFieldValue(r,f));
-      const row=ws.addRow(obj);row.height=photoEnabled&&ai===0?84:20;
-      if(photoEnabled&&ai===0){photoIds.forEach((id,i)=>{if(id!==null)ws.addImage(id,{tl:{col:1+i,row:rowNo-1},ext:{width:145,height:100}})})}
+      const a=assets[ai];sr++;
+      const obj={};
+      if(srDef)obj.std_srNo=sr;
+      otherStandards.forEach(c=>obj[`std_${c.key}`]=standardExportValue(c.key,r,a));
+      allDefs.forEach((f,i)=>obj[`dyn_${i}`]=dynamicFieldValue(r,f));
+      const row=ws.addRow(obj);
+      row.alignment={vertical:'middle',wrapText:true};
+
+      if(photoEnabled){
+        row.height=82;
+        // As in Version 1, every exported asset row carries the record photo,
+        // keeping the visual evidence aligned with the row it supports.
+        photoIds.forEach((id,i)=>{
+          if(id===null)return;
+          ws.addImage(id,{
+            tl:{col:photoStartCol+i+0.06,row:rowNo-1+0.06},
+            ext:{width:140,height:96},
+            editAs:'oneCell'
+          });
+        });
+      }else row.height=20;
       rowNo++;
     }
   }

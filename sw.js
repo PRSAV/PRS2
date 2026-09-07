@@ -1,4 +1,4 @@
-const CACHE = 'prs-assetverify-2-0-6-android-native-scan-photo';
+const CACHE = 'prs-assetverify-2-0-7-camera-excel-stability';
 const CORE = [
   './',
   './index.html',

@@ -1,0 +1,15 @@
+PRS.AssetVerify 2.0.7
+
+Frontend-only stability patch.
+
+Changes:
+- Native Take Photo opens directly from the user tap; GPS no longer runs before camera opening.
+- Scanner camera resources are synchronously released before native photo capture.
+- Lower-memory photo decoding/compression (object URL / createImageBitmap where supported).
+- Scanner resolution/CPU load reduced for smoother Android/iOS operation.
+- Scanner resources are released when app is backgrounded/closed.
+- Excel With Photos layout restored to Version-1 style: Sr No, Photo column(s), then data columns.
+- Photos are anchored inside the correct Photo cell and repeated for each asset row belonging to the record.
+- Service worker cache bumped to 2.0.7.
+
+No Cloudflare / D1 / R2 / OpenAI changes required.
