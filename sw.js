@@ -1,4 +1,4 @@
-const CACHE = 'prs-assetverify-2-0-6-zbar-wasm-mobile-scan';
+const CACHE = 'prs-assetverify-2-0-6-android-native-scan-photo';
 const CORE = [
   './',
   './index.html',

@@ -487,12 +487,13 @@ function scanDynamicValues(parsedList){
 }
 
 // ---------- Scan & Verify ----------
-// 2.0.5 MOBILE SCANNER ENGINE
+// 2.0.6 MOBILE SCANNER ENGINE — ANDROID NATIVE + iOS WASM + SCAN PHOTO EVIDENCE
 // iOS Safari still does not expose BarcodeDetector by default. This scanner
-// therefore uses a WebAssembly ZBar BarcodeDetector polyfill on BOTH iOS and
-// Android. We own the camera stream ourselves and scan both the full live
-// video and a digitally enlarged centre crop. This avoids the "camera opens
-// but never decodes" behaviour seen with the previous JS decoder engines.
+// therefore uses the ZBar WebAssembly polyfill on iOS. Android/Chromium uses
+// the native BarcodeDetector whenever available, so Android scanning no longer
+// depends on the external WASM engine loading successfully. We own the camera
+// stream ourselves and scan both the full live video and a digitally enlarged
+// centre crop.
 function renderScanCodes(){
   const manual=$('manualScanCode').value.trim();
   const all=[...new Set([...scanCodes,...(manual?[manual]:[])])];
@@ -525,15 +526,44 @@ function scannerPolyfillClass(){
   return window.barcodeDetectorPolyfill?.BarcodeDetectorPolyfill || null;
 }
 
+function nativeScannerClass(){
+  // Chrome/Android has a native BarcodeDetector on supported devices. Use it
+  // first so Android does not depend on downloading the ZBar WASM engine.
+  return typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
+}
+
+function hasScannerEngine(){
+  return !!nativeScannerClass() || !!scannerPolyfillClass();
+}
+
 async function createScannerDetector(){
-  const Polyfill=scannerPolyfillClass();
-  if(!Polyfill){
-    throw new Error('Mobile barcode decoder did not load. Check internet access and reload the page.');
+  const formats=['qr_code','code_128','code_39','code_93','ean_13','ean_8','upc_a','upc_e','itf','codabar','data_matrix','pdf417'];
+
+  // Android / Chromium fast path: use the browser's native decoder whenever
+  // it exists. This keeps scanning functional even if the external WASM CDN
+  // is slow or blocked on the Android network.
+  const Native=nativeScannerClass();
+  if(Native){
+    try{
+      let supported=formats;
+      if(typeof Native.getSupportedFormats==='function'){
+        try{supported=await Native.getSupportedFormats()}catch{}
+      }
+      const usable=formats.filter(f=>!Array.isArray(supported)||supported.includes(f));
+      try{return new Native(usable.length?{formats:usable}:undefined)}catch{return new Native()}
+    }catch(error){
+      console.warn('Native BarcodeDetector could not be initialised; trying WASM fallback.',error);
+    }
   }
-  // ZBar supports the common asset-tag formats we need. Keeping the list
-  // explicit reduces work per frame and improves mobile responsiveness.
-  const formats=['qr_code','code_128','code_39','code_93','ean_13','ean_8','upc_a','upc_e','itf','codabar'];
-  return new Polyfill({formats});
+
+  // iOS/Safari fallback: ZBar WebAssembly polyfill. This is the path that is
+  // already working on iPhone in 2.0.5.
+  const Polyfill=scannerPolyfillClass();
+  if(Polyfill){
+    try{return new Polyfill({formats})}catch{return new Polyfill()}
+  }
+
+  throw new Error('No QR / barcode decoder is available on this device. Reload once with internet access and try again.');
 }
 
 function scanRawValue(item){
@@ -627,6 +657,32 @@ function cameraErrorMessage(error){
   return message||name||'Unknown camera error';
 }
 
+async function captureScannerEvidenceFile(){
+  const video=$('prsMobileScanVideo');
+  if(!video||video.readyState<2||!video.videoWidth||!video.videoHeight)return null;
+  try{
+    const srcW=video.videoWidth,srcH=video.videoHeight;
+    const maxSide=1920;
+    const scale=Math.min(1,maxSide/Math.max(srcW,srcH));
+    const w=Math.max(1,Math.round(srcW*scale));
+    const h=Math.max(1,Math.round(srcH*scale));
+    const canvas=document.createElement('canvas');
+    canvas.width=w;canvas.height=h;
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)return null;
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
+    ctx.drawImage(video,0,0,w,h);
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.88));
+    if(!blob)return null;
+    const name=`scan-${new Date().toISOString().replace(/[:.]/g,'-')}.jpg`;
+    try{return new File([blob],name,{type:'image/jpeg',lastModified:Date.now()})}
+    catch{blob.name=name;return blob}
+  }catch(error){
+    console.warn('Could not capture scanner evidence frame:',error);
+    return null;
+  }
+}
+
 function handleScannerDecoded(decoded){
   const value=String(decoded||'').trim();
   if(!value||scannerAutoProceed)return;
@@ -635,10 +691,18 @@ function handleScannerDecoded(decoded){
   $('manualScanCode').value=value;
   renderScanCodes();
   try{navigator.vibrate?.(100)}catch{}
-  $('scanStatus').textContent=`Code detected: ${value}. Auto-filling verification fields…`;
+  $('scanStatus').textContent=`Code detected: ${value}. Capturing evidence photo…`;
 
-  setTimeout(async()=>{
+  // Capture the exact live camera frame that successfully produced the code
+  // BEFORE stopping the camera. That image is stored with the verification
+  // and therefore appears in the "With Photos" Excel export as well.
+  (async()=>{
     try{
+      const evidence=await captureScannerEvidenceFile();
+      if(evidence)scanEvidenceFiles=[evidence,...scanEvidenceFiles].slice(0,12);
+      $('scanStatus').textContent=evidence
+        ?`Code detected: ${value}. Photo captured. Auto-filling verification fields…`
+        :`Code detected: ${value}. Auto-filling verification fields…`;
       await stopScanner({preserveStatus:true});
       $('scannerModal').classList.add('hidden');
       await prepareScanRecord([value],scanEvidenceFiles);
@@ -647,7 +711,7 @@ function handleScannerDecoded(decoded){
       scannerAutoProceed=false;
       $('scanStatus').textContent='The code was read but the form could not open. Tap Use Code(s) & Verify.';
     }
-  },60);
+  })();
 }
 
 function buildScannerVideo(){
@@ -784,8 +848,8 @@ async function startScanner(){
     $('scanStatus').textContent='Live camera is unavailable. Use current Safari on iPhone or Chrome on Android.';
     return;
   }
-  if(!scannerPolyfillClass()){
-    $('scanStatus').textContent='Mobile scanner engine did not load. Reload the page with internet access and try again.';
+  if(!hasScannerEngine()){
+    $('scanStatus').textContent='QR / barcode scanner engine is unavailable. On Android use current Chrome; on iPhone use current Safari. Reload once with internet access and try again.';
     return;
   }
 
