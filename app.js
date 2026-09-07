@@ -55,6 +55,7 @@ let editingFieldGroup = null;
 let aiSeq = 0;
 let activeStatus = 'ALL';
 let scanner = null;
+let scannerControls = null;
 let scannerRunning = false;
 let scannerAutoProceed = false;
 let appendPhotoMode = false;
@@ -481,22 +482,11 @@ function scanDynamicValues(parsedList){
 }
 
 // ---------- Scan & Verify ----------
-// MOBILE-FIRST scanner for Android and iOS.
-// Camera is requested directly from the Start Camera tap. We deliberately do
-// not enumerate cameras or start GPS before camera access, because those extra
-// permission/media calls can interfere with iPhone Safari and some Androids.
-function scannerConfigOptions(){
-  const F=window.Html5QrcodeSupportedFormats;
-  if(!F)return {verbose:false};
-  return {
-    verbose:false,
-    formatsToSupport:[
-      F.QR_CODE,F.CODE_128,F.CODE_39,F.CODE_93,
-      F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.ITF,
-      F.DATA_MATRIX,F.PDF_417
-    ].filter(Boolean)
-  };
-}
+// 2.0.4 MOBILE DECODER ENGINE
+// Live scanning is handled by @zxing/browser instead of html5-qrcode.
+// Reason: html5-qrcode 2.3.8 can open the iPhone camera yet fail to decode
+// codes on iOS. ZXing Browser reads directly from the live video stream and
+// supports both QR and common 1D/2D barcode formats.
 function renderScanCodes(){
   const manual=$('manualScanCode').value.trim();
   const all=[...new Set([...scanCodes,...(manual?[manual]:[])])];
@@ -509,29 +499,53 @@ function renderScanCodes(){
   });
 }
 
-// IMPORTANT: no GPS request here. iPhone receives only one permission flow at
-// a time: Camera first. GPS begins later after scanning succeeds.
 $('scanVerifyBtn').onclick=()=>openScanner();
 $('closeScannerBtn').onclick=closeScanner;
 $('startScannerBtn').onclick=startScanner;
 $('scanImageBtn').onclick=()=>$('scanImageInput').click();
 $('manualScanCode').addEventListener('input',renderScanCodes);
 
+function zxingResultText(result){
+  if(!result)return '';
+  if(typeof result.getText==='function')return String(result.getText()||'').trim();
+  if(typeof result.text==='string')return result.text.trim();
+  return String(result||'').trim();
+}
+
+function loadImageElement(file){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>resolve({img,url});
+    img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Image could not be opened'))};
+    img.src=url;
+  });
+}
+
 $('scanImageInput').onchange=async e=>{
   const files=[...(e.target.files||[])];
   e.target.value='';
   if(!files.length)return;
-  if(!window.Html5Qrcode){toast('Scanner library is unavailable. Reload the page and try again.');return}
+  if(!window.ZXingBrowser?.BrowserMultiFormatReader){
+    toast('Scanner decoder is unavailable. Reload the page and try again.');
+    return;
+  }
   scanEvidenceFiles=[...scanEvidenceFiles,...files].slice(0,12);
   let found=0;
-  const qr=new Html5Qrcode('qrReader',scannerConfigOptions());
+  const reader=new ZXingBrowser.BrowserMultiFormatReader();
   for(const f of files){
+    let item=null;
     try{
-      const code=await qr.scanFile(f,true);
+      item=await loadImageElement(f);
+      const result=await reader.decodeFromImageElement(item.img);
+      const code=zxingResultText(result);
       if(code&&!scanCodes.includes(code)){scanCodes.push(code);found++}
-    }catch{}
+    }catch(error){
+      console.debug('Image scan did not find a code:',error?.name||error?.message||error);
+    }finally{
+      if(item?.url)URL.revokeObjectURL(item.url);
+    }
   }
-  try{await qr.clear()}catch{}
   renderScanCodes();
   $('scanStatus').textContent=found
     ?`${found} new code${found===1?'':'s'} detected.`
@@ -552,7 +566,7 @@ function openScanner(){
   scanEvidenceFiles=[];
   scannerAutoProceed=false;
   $('manualScanCode').value='';
-  $('scanStatus').textContent='Tap Start Camera, allow Camera access, then point the rear camera at the QR / barcode.';
+  $('scanStatus').textContent='Tap Start Camera. Then keep the QR / barcode inside the frame until it is detected automatically.';
   renderScanCodes();
   $('qrReader').innerHTML='';
   $('scannerModal').classList.remove('hidden');
@@ -580,16 +594,6 @@ function cameraErrorMessage(error){
   return message||name||'Unknown camera error';
 }
 
-function scannerRuntimeConfig(){
-  return {
-    fps:12,
-    disableFlip:false,
-    // Use html5-qrcode's cross-browser ZXing decoder consistently instead of
-    // relying on BarcodeDetector, whose support differs between iOS/Android.
-    experimentalFeatures:{useBarCodeDetectorIfSupported:false}
-  };
-}
-
 function handleScannerDecoded(decoded){
   const value=String(decoded||'').trim();
   if(!value||scannerAutoProceed)return;
@@ -597,12 +601,9 @@ function handleScannerDecoded(decoded){
   scanCodes=[value];
   $('manualScanCode').value=value;
   renderScanCodes();
-  try{navigator.vibrate?.(80)}catch{}
-  $('scanStatus').textContent=`Code detected: ${value}. Auto-filling fields…`;
+  try{navigator.vibrate?.(100)}catch{}
+  $('scanStatus').textContent=`Code detected: ${value}. Auto-filling verification fields…`;
 
-  // One successful read is enough. Stop the camera and immediately open the
-  // verification form. For a plain QR like the user's sample, the exact text
-  // is inserted into Barcode / QR / Asset Tag automatically.
   setTimeout(async()=>{
     try{
       await stopScanner({preserveStatus:true});
@@ -613,45 +614,44 @@ function handleScannerDecoded(decoded){
       scannerAutoProceed=false;
       $('scanStatus').textContent='The code was read but the form could not open. Tap Use Code(s) & Verify.';
     }
-  },100);
+  },80);
 }
 
-async function startScannerWithTarget(target){
-  if(scanner){
-    try{if(scannerRunning)await scanner.stop()}catch{}
-    try{await scanner.clear()}catch{}
-    scanner=null;
-  }
-  $('qrReader').innerHTML='';
-  scanner=new Html5Qrcode('qrReader',scannerConfigOptions());
+function buildScannerVideo(){
+  const root=$('qrReader');
+  root.innerHTML=`
+    <div style="position:relative;width:100%;min-height:300px;background:#050914;border-radius:14px;overflow:hidden;">
+      <video id="prsZxingVideo" playsinline webkit-playsinline autoplay muted
+        style="display:block;width:100%;height:min(62vh,520px);object-fit:cover;background:#050914;"></video>
+      <div style="position:absolute;left:10%;right:10%;top:24%;bottom:24%;border:3px solid rgba(255,255,255,.95);border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.18);pointer-events:none;"></div>
+      <div style="position:absolute;left:0;right:0;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Keep the QR / barcode inside the box</div>
+    </div>`;
+  return $('prsZxingVideo');
+}
 
-  await scanner.start(
-    target,
-    scannerRuntimeConfig(),
-    decodedText=>handleScannerDecoded(decodedText),
-    ()=>{}
-  );
-
-  const video=$('qrReader').querySelector('video');
-  if(video){
-    video.setAttribute('playsinline','');
-    video.setAttribute('webkit-playsinline','');
-    video.setAttribute('autoplay','');
-    video.muted=true;
-    video.autoplay=true;
-    video.style.width='100%';
-    video.style.height='auto';
-    video.style.objectFit='cover';
-    try{await video.play()}catch{}
-  }
-
-  // Best-effort continuous focus; unsupported phones simply ignore it.
+async function improveMobileCamera(video){
   try{
-    const caps=scanner.getRunningTrackCapabilities?.();
-    if(Array.isArray(caps?.focusMode)&&caps.focusMode.includes('continuous')){
-      await scanner.applyVideoConstraints?.({advanced:[{focusMode:'continuous'}]});
+    const stream=video?.srcObject;
+    const track=stream?.getVideoTracks?.()[0];
+    if(!track)return;
+    const caps=track.getCapabilities?.()||{};
+
+    // Continuous autofocus where the browser exposes it.
+    if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous')){
+      try{await track.applyConstraints({advanced:[{focusMode:'continuous'}]})}catch{}
     }
-  }catch{}
+
+    // A small optical/digital zoom materially improves recognition of small
+    // fixed-asset labels without requiring the user to move extremely close.
+    if(caps.zoom&&Number.isFinite(caps.zoom.min)&&Number.isFinite(caps.zoom.max)&&caps.zoom.max>caps.zoom.min){
+      const target=Math.min(caps.zoom.max,Math.max(caps.zoom.min,1.5));
+      if(target>caps.zoom.min){
+        try{await track.applyConstraints({advanced:[{zoom:target}]})}catch{}
+      }
+    }
+  }catch(error){
+    console.debug('Optional camera tuning unavailable:',error);
+  }
 }
 
 async function startScanner(){
@@ -660,8 +660,8 @@ async function startScanner(){
     $('scanStatus').textContent='Camera requires HTTPS. Open the PRS2 GitHub Pages website.';
     return;
   }
-  if(!window.Html5Qrcode){
-    toast('Scanner library is unavailable. Reload the page and try again.',4200);
+  if(!window.ZXingBrowser?.BrowserMultiFormatReader){
+    toast('ZXing scanner decoder is unavailable. Reload the page and try again.',4200);
     return;
   }
   if(!navigator.mediaDevices?.getUserMedia){
@@ -675,43 +675,57 @@ async function startScanner(){
   $('scanStatus').textContent='Opening rear camera… allow Camera permission if prompted.';
   scannerAutoProceed=false;
 
-  // Do not call Html5Qrcode.getCameras() here. It can itself acquire/release
-  // getUserMedia, which is a known source of NotReadableError on mobile.
-  const attempts=[
-    {facingMode:'environment'},
-    {facingMode:{ideal:'environment'}},
-    {facingMode:'user'}
-  ];
-
-  let lastError=null;
   try{
-    for(const target of attempts){
-      try{
-        await startScannerWithTarget(target);
-        scannerRunning=true;
-        lastError=null;
-        break;
-      }catch(error){
-        lastError=error;
-        console.warn('Mobile camera attempt failed:',target,error);
-        try{await scanner?.clear()}catch{}
-        scanner=null;
-        scannerRunning=false;
-        $('qrReader').innerHTML='';
-        if(error?.name==='NotAllowedError'||error?.name==='PermissionDeniedError')break;
-        await new Promise(r=>setTimeout(r,250));
-      }
-    }
+    await stopScanner({preserveStatus:true});
+    const video=buildScannerVideo();
+    scanner=new ZXingBrowser.BrowserMultiFormatReader();
 
-    if(!scannerRunning)throw lastError||new Error('No camera configuration could be started.');
+    // High-resolution rear-camera request improves small asset-tag decoding.
+    // Width/height are ideals rather than hard requirements so older phones
+    // can still choose a supported stream.
+    const constraints={
+      audio:false,
+      video:{
+        facingMode:{ideal:'environment'},
+        width:{ideal:1920},
+        height:{ideal:1080},
+        frameRate:{ideal:30,max:30}
+      }
+    };
+
+    scannerControls=await scanner.decodeFromConstraints(
+      constraints,
+      video,
+      (result,error)=>{
+        if(result){
+          const value=zxingResultText(result);
+          if(value)handleScannerDecoded(value);
+        }else if(error){
+          // NotFoundException is expected for most frames. Keep scanning.
+          const name=String(error?.name||error?.constructor?.name||'');
+          if(name&&!/NotFoundException|ChecksumException|FormatException/i.test(name)){
+            console.debug('ZXing frame decode:',name,error?.message||'');
+          }
+        }
+      }
+    );
+
+    scannerRunning=true;
+    video.setAttribute('playsinline','');
+    video.setAttribute('webkit-playsinline','');
+    video.muted=true;
+    try{await video.play()}catch{}
+    await improveMobileCamera(video);
+
     button.disabled=false;
     button.textContent='Stop Camera';
-    $('scanStatus').textContent='Camera is live. Hold the QR / barcode steady and reasonably close; detection and autofill are automatic.';
+    $('scanStatus').textContent='Camera is live and scanning continuously. Keep the full QR / barcode inside the white box for 1–2 seconds.';
   }catch(error){
-    console.error('Camera scanner start failed:',error);
+    console.error('ZXing mobile scanner start failed:',error);
     scannerRunning=false;
     scannerAutoProceed=false;
-    try{await scanner?.clear()}catch{}
+    try{scannerControls?.stop?.()}catch{}
+    scannerControls=null;
     scanner=null;
     $('qrReader').innerHTML='';
     button.disabled=false;
@@ -723,12 +737,13 @@ async function startScanner(){
 async function stopScanner(options={}){
   const button=$('startScannerBtn');
   try{
-    if(scanner){
-      if(scannerRunning){try{await scanner.stop()}catch{}}
-      try{await scanner.clear()}catch{}
-    }
+    try{scannerControls?.stop?.()}catch{}
+    const video=$('prsZxingVideo');
+    const stream=video?.srcObject;
+    if(stream?.getTracks){for(const track of stream.getTracks())try{track.stop()}catch{}}
   }finally{
     scannerRunning=false;
+    scannerControls=null;
     scanner=null;
     $('qrReader').innerHTML='';
     if(button){button.disabled=false;button.textContent='Start Camera'}

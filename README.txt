@@ -1,12 +1,17 @@
-PRS.AssetVerify 2.0.3 Mobile Scanner Fix
+PRS.AssetVerify 2.0.4 - Mobile Decoder Replacement
 
-Replace only app.js and sw.js in the PRS2 GitHub repository.
-No Cloudflare/D1/R2 change is required.
+Replace these GitHub PRS2 files only:
+- index.html
+- app.js
+- sw.js
+
+No Cloudflare Worker, D1, R2 or OpenAI changes are required.
 
 Changes:
-- iPhone/Android camera is requested directly from Start Camera.
-- Removed pre-camera GPS request.
-- Removed pre-start camera enumeration.
-- Uses full-frame ZXing decoder path through html5-qrcode.
-- Automatically stops after first scan and fills Barcode / QR / Asset Tag.
-- GPS starts after scan and remains optional.
+- Replaces html5-qrcode live decoder with @zxing/browser 0.2.1.
+- Continuous multi-format mobile decoding for QR + common barcodes.
+- High-resolution rear camera request.
+- Best-effort autofocus and 1.5x zoom for small asset labels.
+- Automatic code -> Barcode / QR / Asset Tag -> verification form.
+- Uploaded scan images also use ZXing.
+- Service-worker cache bumped to force new scanner assets.
