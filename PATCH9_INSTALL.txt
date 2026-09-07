@@ -1,0 +1,42 @@
+PRS.AssetVerify V2 - Patch 9 iOS Camera Hotfix
+================================================
+Baseline: V2 Patch 8
+
+1. Upload this file to the same GitHub Pages root as app.js:
+   patch9-ios-camera-hotfix.js
+
+2. In index.html, load it AFTER the existing app.js script and BEFORE </body>:
+
+   <script src="patch9-ios-camera-hotfix.js?v=209-ios-camera-1"></script>
+
+3. Do NOT remove app.js. This is a focused hotfix layered on top of Patch 8.
+
+4. Deploy/commit the two changes.
+
+5. On iPhone Safari after deployment:
+   - Close the old PRS tab / home-screen PWA once.
+   - Re-open the site directly in Safari.
+   - If Safari asks, allow Camera.
+   - Test Take Photo.
+   - Test Scan & Verify with a tag.
+   - Confirm the verification preview contains the captured scan photo BEFORE Save.
+   - Export "With Photos" and confirm the photo is embedded in the same asset row.
+
+What Patch 9 changes
+--------------------
+- Uses file input showPicker() with click() fallback for Take Photo / Gallery.
+- Keeps file inputs rendered off-screen rather than display:none for iOS reliability.
+- Resets stale camera-picker busy state after cancellation/return from Safari camera.
+- Pre-warms the iOS barcode decoder.
+- Opens camera and decoder in parallel; decoder failure no longer tears the camera down.
+- Simplifies rear-camera constraints for iPhone.
+- Uses lower-memory JPEG capture/compression with toDataURL fallback if canvas.toBlob fails.
+- Retries scanner evidence-frame capture up to 3 times.
+- Scan & Verify cannot proceed or save without an evidence photo.
+- Manual-code fallback can still capture an evidence frame from the live camera.
+
+NOTE
+----
+Patch 8's backend already supports storing multiple photos. This hotfix fixes the
+frontend iPhone camera/scanner/evidence path. For an even stricter server-side rule,
+a later Worker patch can reject any source="scan" request that contains zero photos.
