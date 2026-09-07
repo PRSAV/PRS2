@@ -559,7 +559,7 @@ function scanDynamicValues(parsedList){
 }
 
 // ---------- Scan & Verify ----------
-// 2.0.10 MOBILE SCANNER ENGINE
+// 2.0.11 MOBILE SCANNER ENGINE
 // iPhone/iPad deliberately uses the native iOS camera capture UI instead of a
 // getUserMedia live stream. This is far more reliable in Safari/PWA mode and
 // still preserves the captured photo as verification evidence. Android/desktop
@@ -635,6 +635,24 @@ function loadImageElement(file){
 
 let scannerEngineLoadPromise=null;
 let scannerEngineSource='';
+let zxingEngineLoadPromise=null;
+let msiEngineLoadPromise=null;
+
+// Patch 11 primary decoder: ZXing-C++ WebAssembly via zxing-wasm.
+// It supports QR (Model 1/2), Micro QR, rMQR, EAN/UPC, DataBar variants,
+// Code 39/93/128, ITF, Codabar, Data Matrix, PDF417/MicroPDF417, Aztec,
+// Telepen and other readable ZXing-C++ symbologies. The browser's native
+// BarcodeDetector / ZBar polyfill remains as a fallback, and MSI/Plessey gets
+// a dedicated pure-JS fallback because it is not currently a ZXing-C++ reader.
+const ZXING_WASM_VERSION='3.1.3';
+const ZXING_IIFE_URLS=[
+  `https://cdn.jsdelivr.net/npm/zxing-wasm@${ZXING_WASM_VERSION}/dist/iife/reader/index.js`,
+  `https://unpkg.com/zxing-wasm@${ZXING_WASM_VERSION}/dist/iife/reader/index.js`
+];
+const MSI_READER_URLS=[
+  'https://unpkg.com/javascript-barcode-reader@1.0.0',
+  'https://cdn.jsdelivr.net/npm/javascript-barcode-reader@1.0.0/dist/javascript-barcode-reader.js'
+];
 
 function scannerPolyfillClass(){
   return window.__prsBarcodeDetectorPolyfill || window.barcodeDetectorPolyfill?.BarcodeDetectorPolyfill || null;
@@ -648,7 +666,7 @@ function scannerScriptLoaded(url){
   return [...document.scripts].some(s=>s.src===url && s.dataset.prsScannerLoaded==='1');
 }
 
-function loadScannerScript(url,timeoutMs=12000){
+function loadScannerScript(url,timeoutMs=16000){
   return new Promise((resolve,reject)=>{
     if(scannerScriptLoaded(url)){resolve();return}
     const existing=[...document.scripts].find(s=>s.src===url);
@@ -675,6 +693,86 @@ function loadScannerScript(url,timeoutMs=12000){
   });
 }
 
+async function ensureZXingWasmEngine(){
+  if(window.ZXingWASM?.readBarcodes)return window.ZXingWASM;
+  if(zxingEngineLoadPromise)return zxingEngineLoadPromise;
+  zxingEngineLoadPromise=(async()=>{
+    let lastError=null;
+    for(const url of ZXING_IIFE_URLS){
+      try{
+        await loadScannerScript(url,20000);
+        if(window.ZXingWASM?.readBarcodes)return window.ZXingWASM;
+        throw new Error('ZXingWASM global did not expose readBarcodes');
+      }catch(error){lastError=error;console.warn('ZXing-C++ WASM load failed:',url,error)}
+    }
+    throw lastError||new Error('Universal ZXing-C++ barcode engine could not load');
+  })();
+  try{return await zxingEngineLoadPromise}
+  finally{if(!window.ZXingWASM?.readBarcodes)zxingEngineLoadPromise=null}
+}
+
+function sourceImageData(source,maxSide=1800){
+  if(typeof ImageData!=='undefined'&&source instanceof ImageData)return source;
+  if(source?.data instanceof Uint8ClampedArray&&source?.width&&source?.height)return source;
+  if(typeof HTMLCanvasElement!=='undefined'&&source instanceof HTMLCanvasElement){
+    const ctx=source.getContext('2d',{willReadFrequently:true});
+    return ctx?.getImageData(0,0,source.width,source.height)||null;
+  }
+  const sw=Number(source?.videoWidth||source?.naturalWidth||source?.width||0);
+  const sh=Number(source?.videoHeight||source?.naturalHeight||source?.height||0);
+  if(!sw||!sh)return null;
+  const scale=Math.min(1,maxSide/Math.max(sw,sh));
+  const w=Math.max(1,Math.round(sw*scale)),h=Math.max(1,Math.round(sh*scale));
+  const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});
+  if(!ctx)return null;
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(source,0,0,w,h);
+  try{return ctx.getImageData(0,0,w,h)}catch{return null}
+}
+
+async function zxingInputFromSource(source){
+  if(typeof Blob!=='undefined'&&source instanceof Blob)return source;
+  if(source instanceof ArrayBuffer||source instanceof Uint8Array)return source;
+  return sourceImageData(source,2200);
+}
+
+function normalizeZXingResults(results){
+  return (results||[]).map(r=>({
+    rawValue:String(r?.text??r?.rawValue??'').trim(),
+    text:String(r?.text??r?.rawValue??'').trim(),
+    format:String(r?.format||''),
+    symbology:String(r?.symbology||'')
+  })).filter(r=>r.rawValue);
+}
+
+async function createZXingWasmDetector(){
+  const engine=await ensureZXingWasmEngine();
+  scannerEngineSource=`ZXing-C++ WASM ${ZXING_WASM_VERSION}`;
+  return {
+    async detect(source){
+      const input=await zxingInputFromSource(source);
+      if(!input)return [];
+      try{
+        const results=await engine.readBarcodes(input,{
+          formats:['AllReadable'],
+          tryHarder:true,
+          tryRotate:true,
+          tryInvert:true,
+          tryDownscale:true,
+          tryDenoise:true,
+          maxNumberOfSymbols:32
+        });
+        return normalizeZXingResults(results);
+      }catch(firstError){
+        // Keep a compatibility retry in case a future CDN build changes an
+        // option name while preserving the readBarcodes API.
+        try{return normalizeZXingResults(await engine.readBarcodes(input))}
+        catch{throw firstError}
+      }
+    }
+  };
+}
+
 async function loadScannerPair(base,label){
   const zbar=`${base}/@undecaf/zbar-wasm@0.9.15/dist/index.js`;
   const poly=`${base}/@undecaf/barcode-detector-polyfill@0.9.23/dist/index.js`;
@@ -690,35 +788,18 @@ async function ensureScannerFallbackEngine(){
   if(scannerPolyfillClass())return scannerPolyfillClass();
   if(scannerEngineLoadPromise)return scannerEngineLoadPromise;
   scannerEngineLoadPromise=(async()=>{
-    const attempts=[
-      ['https://cdn.jsdelivr.net/npm','jsDelivr'],
-      ['https://unpkg.com','unpkg']
-    ];
+    const attempts=[['https://cdn.jsdelivr.net/npm','jsDelivr ZBar'],['https://unpkg.com','unpkg ZBar']];
     for(const [base,label] of attempts){
       try{return await loadScannerPair(base,label)}catch(error){console.warn(`Scanner ${label} load failed`,error)}
     }
-    for(const url of [
-      'https://cdn.jsdelivr.net/npm/@undecaf/barcode-detector-polyfill@0.9.23/dist/main.js',
-      'https://unpkg.com/@undecaf/barcode-detector-polyfill@0.9.23/dist/main.js'
-    ]){
-      try{
-        const mod=await import(url);
-        const Polyfill=mod?.BarcodeDetectorPolyfill;
-        if(Polyfill){
-          window.__prsBarcodeDetectorPolyfill=Polyfill;
-          scannerEngineSource=url.includes('jsdelivr')?'jsDelivr module':'unpkg module';
-          return Polyfill;
-        }
-      }catch(error){console.warn('Scanner module fallback failed',url,error)}
-    }
-    throw new Error('QR / barcode recognition could not load. You can still enter the code manually; the captured photo will remain attached.');
+    throw new Error('Fallback QR / barcode recognition could not load.');
   })();
   try{return await scannerEngineLoadPromise}
   finally{if(!scannerPolyfillClass())scannerEngineLoadPromise=null}
 }
 
-async function createScannerDetector(){
-  const requested=['qr_code','code_128','code_39','code_93','ean_13','ean_8','upc_a','upc_e','itf','codabar'];
+async function createLegacyDetector(){
+  const requested=['aztec','code_128','code_39','code_93','codabar','data_matrix','ean_13','ean_8','itf','pdf417','qr_code','upc_a','upc_e'];
   const Native=nativeScannerClass();
   if(Native){
     try{
@@ -727,13 +808,81 @@ async function createScannerDetector(){
       const usable=requested.filter(f=>!Array.isArray(supported)||supported.includes(f));
       scannerEngineSource='native BarcodeDetector';
       try{return new Native(usable.length?{formats:usable}:undefined)}catch{return new Native()}
-    }catch(error){console.warn('Native BarcodeDetector could not be initialised; loading fallback.',error)}
+    }catch(error){console.warn('Native BarcodeDetector could not be initialised.',error)}
   }
   const Polyfill=scannerPolyfillClass() || await ensureScannerFallbackEngine();
   let supported=requested;
   if(typeof Polyfill.getSupportedFormats==='function'){try{supported=await Polyfill.getSupportedFormats()}catch{}}
   const usable=requested.filter(f=>!Array.isArray(supported)||supported.includes(f));
   try{return new Polyfill(usable.length?{formats:usable}:undefined)}catch{return new Polyfill()}
+}
+
+async function ensureMSIPlesseyEngine(){
+  if(typeof window.javascriptBarcodeReader==='function')return window.javascriptBarcodeReader;
+  if(msiEngineLoadPromise)return msiEngineLoadPromise;
+  msiEngineLoadPromise=(async()=>{
+    let last=null;
+    for(const url of MSI_READER_URLS){
+      try{
+        await loadScannerScript(url,14000);
+        if(typeof window.javascriptBarcodeReader==='function')return window.javascriptBarcodeReader;
+      }catch(error){last=error;console.warn('MSI/Plessey fallback load failed:',url,error)}
+    }
+    throw last||new Error('MSI/Plessey decoder unavailable');
+  })();
+  try{return await msiEngineLoadPromise}
+  finally{if(typeof window.javascriptBarcodeReader!=='function')msiEngineLoadPromise=null}
+}
+
+async function detectMSIPlessey(source){
+  let reader;
+  try{reader=await ensureMSIPlesseyEngine()}catch{return []}
+  const image=sourceImageData(source,2200);
+  if(!image)return [];
+  try{
+    const result=await reader({
+      image,
+      barcode:'msi',
+      options:{useAdaptiveThreshold:true,detectRotation:true,locateBarcode:true}
+    });
+    const value=String(result?.text??result?.code??result?.value??result??'').trim();
+    return value?[{rawValue:value,text:value,format:'MSI',symbology:'MSIPlessey'}]:[];
+  }catch{return []}
+}
+
+async function createScannerDetector(){
+  let primary=null,legacy=null,legacyAttempted=false;
+  try{primary=await createZXingWasmDetector()}catch(error){console.warn('Universal ZXing-C++ engine unavailable; fallback will be used.',error)}
+  const getLegacy=async()=>{
+    if(legacyAttempted)return legacy;
+    legacyAttempted=true;
+    try{legacy=await createLegacyDetector()}catch(error){console.warn('Legacy barcode engine unavailable.',error);legacy=null}
+    return legacy;
+  };
+  // If ZXing itself could not load, initialise the browser/ZBar fallback now so
+  // the user gets a useful error immediately instead of only after taking a photo.
+  if(!primary)await getLegacy();
+  if(!primary&&!legacy)throw new Error('Universal QR / barcode recognition could not initialise. Check internet once and retry.');
+  return {
+    async detect(source){
+      let results=[];
+      if(primary){try{results=await primary.detect(source)}catch(error){console.debug('ZXing universal decode pass failed:',error)}}
+      if(results?.length)return results;
+
+      // Browser BarcodeDetector and the MSI decoder prefer pixel/image sources.
+      // Convert a File/Blob only after the high-resolution ZXing pass has failed.
+      let fallbackSource=source,bitmap=null;
+      if(typeof Blob!=='undefined'&&source instanceof Blob&&typeof createImageBitmap==='function'){
+        try{bitmap=await createImageBitmap(source,{imageOrientation:'from-image'});fallbackSource=bitmap}catch{}
+      }
+      try{
+        const fallback=await getLegacy();
+        if(fallback){try{results=await fallback.detect(fallbackSource)}catch(error){console.debug('BarcodeDetector fallback pass failed:',error)}}
+        if(results?.length)return results;
+        return await detectMSIPlessey(fallbackSource);
+      }finally{try{bitmap?.close?.()}catch{}}
+    }
+  };
 }
 
 function scanRawValue(item){
@@ -787,8 +936,12 @@ async function detectCodesFromImageFile(file){
   let item=null;
   const found=[];
   try{
-    item=await loadImageElement(file);
     const push=vals=>{for(const v of vals||[])if(v&&!found.includes(v))found.push(v)};
+    // First pass uses the original File so ZXing receives the camera's full
+    // encoded resolution. This is especially important for narrow 1D bars.
+    try{push(await detectWithDetector(detector,file))}catch(error){console.debug('Original-file decode failed',error)}
+    if(found.length)return found;
+    item=await loadImageElement(file);
     try{push(await detectWithDetector(detector,item.img))}catch(error){console.debug('Direct image decode failed',error)}
     if(found.length)return found;
     for(const opts of [
@@ -843,7 +996,7 @@ function ensureIOSScanCameraInput(){
 
     scanEvidenceFiles=[file];
     showCapturedScanPhoto(file);
-    $('scanStatus').textContent='Photo captured. Reading QR / barcode…';
+    $('scanStatus').textContent='Photo captured. Reading QR / barcode with universal decoder…';
     let codes=[];
     try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('iPhone captured-image scan failed:',error)}
     if(codes.length){
@@ -954,9 +1107,9 @@ function openScanner(){
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
     if(iosLabel){iosLabel.hidden=false;iosLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='iPhone scanner ready (V2 Patch 10). Tap Open Camera & Scan, take a clear photo of the complete QR / barcode, and the same photo will be saved as evidence.';
+    $('scanStatus').textContent='Universal scanner ready (V2 Patch 11). Tap Open Camera & Scan, take a clear photo of the complete symbol, and the same photo will be saved as evidence. Supports QR, Micro QR, rMQR, EAN/UPC, Code 39/93/128, ITF, Codabar, DataBar, Data Matrix, PDF417, Aztec and MSI/Plessey.';
     // Warm the decoder in the background. This never blocks the native camera.
-    if(navigator.onLine&&!nativeScannerClass()&&!scannerPolyfillClass())setTimeout(()=>ensureScannerFallbackEngine().catch(error=>console.warn('Scanner warm-up failed',error)),0);
+    if(navigator.onLine)setTimeout(()=>ensureZXingWasmEngine().catch(error=>console.warn('Universal scanner warm-up failed',error)),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
     if(iosLabel)iosLabel.hidden=true;
@@ -1111,11 +1264,11 @@ async function startScanner(){
     const video=buildScannerVideo();video.srcObject=stream;video.muted=true;video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');
     try{const p=video.play();p?.catch?.(()=>{})}catch{}
     await waitForVideoReady(video);tuneMobileCamera(video).catch(()=>{});
-    scannerRunning=true;scannerStartedAt=Date.now();button.disabled=false;button.textContent='Stop Camera';$('scanStatus').textContent='Camera is live. Preparing QR / barcode recognition…';
+    scannerRunning=true;scannerStartedAt=Date.now();button.disabled=false;button.textContent='Stop Camera';$('scanStatus').textContent='Camera is live. Preparing universal QR / barcode recognition…';
     try{scannerDetector=await createScannerDetector()}catch(error){scannerDetector=null;console.error('Scanner decoder failed while camera stayed open:',error)}
     if(!scannerRunning)return;
     if(!scannerDetector){$('scanStatus').textContent='Camera is live but automatic recognition could not load. Enter the code manually and tap Use Code(s) & Verify; the evidence photo will be captured from the live camera.';return}
-    $('scanStatus').textContent=`Camera is live and scanning automatically${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the QR / barcode steady inside the box.`;scheduleScannerLoop(180);
+    $('scanStatus').textContent=`Universal scanner is live${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the complete QR / barcode steady inside the box.`;scheduleScannerLoop(180);
   }catch(error){
     console.error('Mobile scanner start failed:',error);scannerRunning=false;scannerScanBusy=false;scannerDetector=null;clearTimeout(scannerLoopTimer);scannerLoopTimer=null;
     if(stream?.getTracks)for(const track of stream.getTracks())try{track.stop()}catch{};stopTracksSynchronously();$('qrReader').innerHTML='';button.disabled=false;button.textContent='Start Camera';$('scanStatus').textContent=`Camera scanner could not start. ${cameraErrorMessage(error)}`;

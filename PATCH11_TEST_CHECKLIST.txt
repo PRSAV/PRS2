@@ -1,0 +1,16 @@
+Patch 11 deployment smoke test
+==============================
+[ ] iPhone: Scan & Verify shows "Universal scanner ready (V2 Patch 11)"
+[ ] iPhone: Open Camera & Scan opens native rear camera
+[ ] QR Code decodes and evidence photo remains attached
+[ ] Code 128 decodes from a clear full-frame photo
+[ ] EAN/UPC decodes from a close sharp photo
+[ ] Data Matrix decodes
+[ ] PDF417 decodes
+[ ] Aztec decodes
+[ ] Micro QR / rMQR decodes when sample is available
+[ ] DataBar decodes when sample is available
+[ ] MSI Plessey decodes when sample is available
+[ ] Saved scan displays evidence photo in record
+[ ] Export With Photos embeds evidence photo in correct row
+[ ] Android live scanner still opens and scans

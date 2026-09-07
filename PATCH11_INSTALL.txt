@@ -1,0 +1,47 @@
+PRS.AssetVerify V2 — Patch 11 Universal Barcode Engine
+=====================================================
+Baseline: V2 Patch 10 (iPhone Native Scanner)
+
+Purpose
+-------
+Keep the working Patch 10 iPhone native-camera workflow unchanged, but replace
+its decoder layer with a broader multi-engine reader for 1D/2D symbols.
+
+Deploy
+------
+Replace ONLY these three root files in PRSAV/PRS2:
+  1. app.js
+  2. index.html
+  3. sw.js
+
+Do not replace styles.css, manifest.webmanifest, icon.svg, Worker code, database,
+or any existing data.
+
+After merge into main:
+  1. Wait for GitHub Pages deployment.
+  2. Close all PRS Safari tabs on iPhone.
+  3. Reopen the site.
+  4. Open Scan & Verify.
+  5. Confirm the status says: "Universal scanner ready (V2 Patch 11)."
+
+Decoder architecture
+--------------------
+Primary: zxing-wasm 3.1.3 / ZXing-C++ WebAssembly (AllReadable)
+Fallback: native BarcodeDetector where available, then ZBar polyfill
+MSI fallback: javascript-barcode-reader 1.0.0
+
+The decoder dependencies are loaded from fixed-version jsDelivr/unpkg URLs and
+cached by the existing service worker after successful use. The iPhone native
+camera itself remains independent of these decoder downloads.
+
+Important proprietary-code limitation
+--------------------------------------
+SQRC: ordinary QR readers can read the public portion. Private SQRC data requires
+the relevant cryptographic key and a DENSO-compatible/dedicated reader.
+FrameQR: DENSO FrameQR is proprietary and ordinary/open-source QR decoders do not
+provide full FrameQR decoding. Full FrameQR support requires DENSO's decoder/Q
+Platform or another licensed compatible implementation.
+
+Rollback
+--------
+Restore Patch 10 app.js, index.html and sw.js.

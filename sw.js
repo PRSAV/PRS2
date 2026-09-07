@@ -1,8 +1,8 @@
-const CACHE = 'prs-assetverify-2-0-10-ios-native-scan';
+const CACHE = 'prs-assetverify-2-0-11-universal-barcode-engine';
 const CORE = [
   './',
   './index.html',
-  './app.js?v=210',
+  './app.js?v=211',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'

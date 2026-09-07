@@ -1,0 +1,42 @@
+PRS.AssetVerify V2 Patch 11 — Requested Symbology Coverage
+==========================================================
+
+SUPPORTED BY PATCH 11 OPEN DECODER
+----------------------------------
+QR Code                         YES
+Micro QR Code                   YES
+rMQR Code                       YES
+UPC-A / UPC-E                   YES
+EAN-13 / EAN-8                  YES
+Code 39                         YES
+Code 128                        YES
+ITF / ITF-14                    YES
+Code 93                         YES
+Codabar                         YES
+GS1 DataBar/RSS                 YES (including major DataBar variants)
+MSI Plessey                     YES (dedicated JS fallback)
+Data Matrix                     YES
+PDF417                          YES
+MicroPDF417                     YES
+Aztec                           YES
+
+ADDITIONAL ZXING-C++ READABLE TYPES
+-----------------------------------
+QR Model 1 / Model 2, Code39 Extended/Code32/PZN, DataBar Stacked/Limited/
+Expanded, Compact PDF417, Aztec Rune, Telepen, MaxiCode (partial), DX Film Edge,
+and EAN/UPC variants supported by the current ZXing-C++ build.
+
+PROPRIETARY / LICENSED VARIANTS
+-------------------------------
+SQRC                            PARTIAL: public QR data can be read; private
+                                data requires the issuer cryptographic key and
+                                DENSO-compatible reader.
+DENSO FrameQR                   NOT natively decoded by the open-source engine.
+                                Full support requires DENSO decoder/Q Platform
+                                or another licensed compatible implementation.
+
+NOTE
+----
+'SQRC' and 'FrameQR' are not merely extra names that can be enabled in a generic
+QR library. They have proprietary reading/security requirements, so Patch 11
+does not falsely claim full decoding of protected/proprietary content.
