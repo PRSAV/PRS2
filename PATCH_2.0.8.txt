@@ -1,0 +1,10 @@
+PRS.AssetVerify 2.0.8 - Resilient Mobile Scanner
+
+Frontend-only scanner patch.
+- Camera opens first from user tap.
+- Native BarcodeDetector used if available.
+- Otherwise ZBar polyfill loads on demand.
+- Retries jsDelivr and unpkg.
+- Final ESM fallback.
+- Removes page-start scanner dependency race that caused Android "engine unavailable".
+- Preserves the existing scan-photo evidence and Excel alignment fixes from 2.0.7.

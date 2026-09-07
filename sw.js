@@ -1,4 +1,4 @@
-const CACHE = 'prs-assetverify-2-0-7-camera-excel-stability';
+const CACHE = 'prs-assetverify-2-0-8-resilient-mobile-scanner';
 const CORE = [
   './',
   './index.html',

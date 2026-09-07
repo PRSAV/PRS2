@@ -561,48 +561,124 @@ function loadImageElement(file){
   });
 }
 
+let scannerEngineLoadPromise=null;
+let scannerEngineSource='';
+
 function scannerPolyfillClass(){
-  return window.barcodeDetectorPolyfill?.BarcodeDetectorPolyfill || null;
+  return window.__prsBarcodeDetectorPolyfill || window.barcodeDetectorPolyfill?.BarcodeDetectorPolyfill || null;
 }
 
 function nativeScannerClass(){
-  // Chrome/Android has a native BarcodeDetector on supported devices. Use it
-  // first so Android does not depend on downloading the ZBar WASM engine.
+  // BarcodeDetector is not available on every Android/Chrome build, so it is
+  // only the fast path. The app must never fail merely because this API is
+  // absent.
   return typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
 }
 
-function hasScannerEngine(){
-  return !!nativeScannerClass() || !!scannerPolyfillClass();
+function scannerScriptLoaded(url){
+  return [...document.scripts].some(s=>s.src===url && s.dataset.prsScannerLoaded==='1');
+}
+
+function loadScannerScript(url,timeoutMs=9000){
+  return new Promise((resolve,reject)=>{
+    if(scannerScriptLoaded(url)){resolve();return}
+    const existing=[...document.scripts].find(s=>s.src===url);
+    if(existing){
+      if(existing.dataset.prsScannerLoaded==='1'){resolve();return}
+      if(existing.dataset.prsScannerFailed==='1'){existing.remove()}
+      else{
+        const timer=setTimeout(()=>reject(new Error(`Scanner dependency timed out: ${url}`)),timeoutMs);
+        existing.addEventListener('load',()=>{clearTimeout(timer);existing.dataset.prsScannerLoaded='1';resolve()},{once:true});
+        existing.addEventListener('error',()=>{clearTimeout(timer);existing.dataset.prsScannerFailed='1';reject(new Error(`Scanner dependency failed: ${url}`))},{once:true});
+        return;
+      }
+    }
+    const script=document.createElement('script');
+    script.src=url;
+    script.async=true;
+    script.crossOrigin='anonymous';
+    script.dataset.prsScannerRuntime='1';
+    const timer=setTimeout(()=>{
+      script.dataset.prsScannerFailed='1';
+      try{script.remove()}catch{}
+      reject(new Error(`Scanner dependency timed out: ${url}`));
+    },timeoutMs);
+    script.onload=()=>{
+      clearTimeout(timer);
+      script.dataset.prsScannerLoaded='1';
+      resolve();
+    };
+    script.onerror=()=>{
+      clearTimeout(timer);
+      script.dataset.prsScannerFailed='1';
+      try{script.remove()}catch{}
+      reject(new Error(`Scanner dependency failed: ${url}`));
+    };
+    document.head.appendChild(script);
+  });
+}
+
+async function loadScannerPair(base,label){
+  const zbar=`${base}/@undecaf/zbar-wasm@0.9.15/dist/index.js`;
+  const poly=`${base}/@undecaf/barcode-detector-polyfill@0.9.23/dist/index.js`;
+  await loadScannerScript(zbar);
+  await loadScannerScript(poly);
+  const Polyfill=scannerPolyfillClass();
+  if(!Polyfill)throw new Error(`${label} loaded but did not expose BarcodeDetectorPolyfill`);
+  scannerEngineSource=label;
+  return Polyfill;
+}
+
+async function ensureScannerFallbackEngine(){
+  if(scannerPolyfillClass())return scannerPolyfillClass();
+  if(scannerEngineLoadPromise)return scannerEngineLoadPromise;
+  scannerEngineLoadPromise=(async()=>{
+    const attempts=[
+      ['https://cdn.jsdelivr.net/npm','jsDelivr'],
+      ['https://unpkg.com','unpkg']
+    ];
+    for(const [base,label] of attempts){
+      try{return await loadScannerPair(base,label)}catch(error){
+        console.warn(`Scanner ${label} load failed`,error);
+      }
+    }
+    for(const url of [
+      'https://cdn.jsdelivr.net/npm/@undecaf/barcode-detector-polyfill@0.9.23/dist/main.js',
+      'https://unpkg.com/@undecaf/barcode-detector-polyfill@0.9.23/dist/main.js'
+    ]){
+      try{
+        const mod=await import(url);
+        const Polyfill=mod?.BarcodeDetectorPolyfill;
+        if(Polyfill){
+          window.__prsBarcodeDetectorPolyfill=Polyfill;
+          scannerEngineSource=url.includes('jsdelivr')?'jsDelivr module':'unpkg module';
+          return Polyfill;
+        }
+      }catch(error){console.warn('Scanner module fallback failed',url,error)}
+    }
+    throw new Error('The QR / barcode decoder could not be loaded. Check internet access once, then retry Start Camera.');
+  })();
+  try{return await scannerEngineLoadPromise}
+  finally{if(!scannerPolyfillClass())scannerEngineLoadPromise=null}
 }
 
 async function createScannerDetector(){
-  const formats=['qr_code','code_128','code_39','code_93','ean_13','ean_8','upc_a','upc_e','itf','codabar','data_matrix','pdf417'];
-
-  // Android / Chromium fast path: use the browser's native decoder whenever
-  // it exists. This keeps scanning functional even if the external WASM CDN
-  // is slow or blocked on the Android network.
+  const requested=['qr_code','code_128','code_39','code_93','ean_13','ean_8','upc_a','upc_e','itf','codabar'];
   const Native=nativeScannerClass();
   if(Native){
     try{
-      let supported=formats;
-      if(typeof Native.getSupportedFormats==='function'){
-        try{supported=await Native.getSupportedFormats()}catch{}
-      }
-      const usable=formats.filter(f=>!Array.isArray(supported)||supported.includes(f));
+      let supported=requested;
+      if(typeof Native.getSupportedFormats==='function'){try{supported=await Native.getSupportedFormats()}catch{}}
+      const usable=requested.filter(f=>!Array.isArray(supported)||supported.includes(f));
+      scannerEngineSource='native BarcodeDetector';
       try{return new Native(usable.length?{formats:usable}:undefined)}catch{return new Native()}
-    }catch(error){
-      console.warn('Native BarcodeDetector could not be initialised; trying WASM fallback.',error);
-    }
+    }catch(error){console.warn('Native BarcodeDetector could not be initialised; loading fallback.',error)}
   }
-
-  // iOS/Safari fallback: ZBar WebAssembly polyfill. This is the path that is
-  // already working on iPhone in 2.0.5.
-  const Polyfill=scannerPolyfillClass();
-  if(Polyfill){
-    try{return new Polyfill({formats})}catch{return new Polyfill()}
-  }
-
-  throw new Error('No QR / barcode decoder is available on this device. Reload once with internet access and try again.');
+  const Polyfill=scannerPolyfillClass() || await ensureScannerFallbackEngine();
+  let supported=requested;
+  if(typeof Polyfill.getSupportedFormats==='function'){try{supported=await Polyfill.getSupportedFormats()}catch{}}
+  const usable=requested.filter(f=>!Array.isArray(supported)||supported.includes(f));
+  try{return new Polyfill(usable.length?{formats:usable}:undefined)}catch{return new Polyfill()}
 }
 
 function scanRawValue(item){
@@ -887,11 +963,6 @@ async function startScanner(){
     $('scanStatus').textContent='Live camera is unavailable. Use current Safari on iPhone or Chrome on Android.';
     return;
   }
-  if(!hasScannerEngine()){
-    $('scanStatus').textContent='QR / barcode scanner engine is unavailable. On Android use current Chrome; on iPhone use current Safari. Reload once with internet access and try again.';
-    return;
-  }
-
   const button=$('startScannerBtn');
   button.disabled=true;
   button.textContent='Opening Camera…';
@@ -927,13 +998,13 @@ async function startScanner(){
     try{await video.play()}catch{}
     await tuneMobileCamera(video);
 
-    $('scanStatus').textContent='Camera is live. Loading QR / barcode recognition engine…';
+    $('scanStatus').textContent='Camera is live. Preparing QR / barcode recognition…';
     scannerDetector=await createScannerDetector();
     scannerRunning=true;
     scannerStartedAt=Date.now();
     button.disabled=false;
     button.textContent='Stop Camera';
-    $('scanStatus').textContent='Camera is live and scanning automatically. Hold the QR / barcode steady inside the box.';
+    $('scanStatus').textContent=`Camera is live and scanning automatically${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the QR / barcode steady inside the box.`;
     scheduleScannerLoop(140);
   }catch(error){
     console.error('Mobile scanner start failed:',error);
@@ -947,7 +1018,10 @@ async function startScanner(){
     $('qrReader').innerHTML='';
     button.disabled=false;
     button.textContent='Start Camera';
-    $('scanStatus').textContent=`Camera scanner could not start. ${cameraErrorMessage(error)}`;
+    const msg=String(error?.message||'');
+    $('scanStatus').textContent=/decoder|dependency|BarcodeDetectorPolyfill|scanner engine/i.test(msg)
+      ?`Camera opened, but QR / barcode recognition could not initialise. ${msg}`
+      :`Camera scanner could not start. ${cameraErrorMessage(error)}`;
   }
 }
 
