@@ -1,4 +1,4 @@
-const CACHE = 'prs-assetverify-2-0-5-zxing-mobile-decode';
+const CACHE = 'prs-assetverify-2-0-6-zbar-wasm-mobile-scan';
 const CORE = [
   './',
   './index.html',
