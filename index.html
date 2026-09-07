@@ -348,7 +348,7 @@
     <div class="modal-head"><div><div class="eyebrow">SCAN & VERIFY</div><h2>Barcode / QR scanner</h2></div><button id="closeScannerBtn" class="icon-btn">✕</button></div>
     <div id="qrReader" class="qr-reader"></div>
     <div class="form-stack"><label>Scanned Code<input id="manualScanCode" placeholder="Scan or enter manually" /></label><div id="scanDetectedList" class="scan-code-list"></div></div>
-    <div class="grid two"><button id="startScannerBtn" class="primary">Start Camera</button><button id="scanImageBtn" class="secondary">Scan Image</button></div>
+    <div class="grid two"><button id="startScannerBtn" class="primary">Start Camera</button><label id="iosScanCameraLabel" for="prsIOSScanCameraInput" class="primary" hidden role="button" style="align-items:center;justify-content:center;text-align:center;cursor:pointer;min-height:44px;padding:10px 14px;border-radius:10px;">Open Camera &amp; Scan</label><button id="scanImageBtn" class="secondary">Scan Image</button></div>
     <button id="useScanCodeBtn" class="success full">Use Code(s) & Verify</button>
     <p id="scanStatus" class="field-note"></p>
   </div></div>
@@ -390,6 +390,6 @@
   </div></div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=210"></script>
 </body>
 </html>

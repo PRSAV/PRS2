@@ -1,8 +1,8 @@
-const CACHE = 'prs-assetverify-2-0-8-resilient-mobile-scanner';
+const CACHE = 'prs-assetverify-2-0-10-ios-native-scan';
 const CORE = [
   './',
   './index.html',
-  './app.js',
+  './app.js?v=210',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'
@@ -25,7 +25,7 @@ self.addEventListener('activate', event => {
 });
 
 async function cacheResponse(request, response) {
-  if (!response) return response;
+  if (!response || !response.ok) return response;
   try {
     const cache = await caches.open(CACHE);
     await cache.put(request, response.clone());
@@ -40,31 +40,30 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   const sameOrigin = url.origin === self.location.origin;
   const trustedRuntimeAsset = url.hostname === 'unpkg.com' || url.hostname === 'cdn.jsdelivr.net';
-
-  // Never cache Cloudflare API / Worker responses. The app must know when the
-  // network is unavailable so it can queue verification actions in IndexedDB.
   if (!sameOrigin && !trustedRuntimeAsset) return;
 
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then(response => cacheResponse(request, response))
-        .catch(async () => (await caches.match('./index.html')) || (await caches.match('./')))
-    );
+  // Navigation and all same-origin application files are network-first. This is
+  // intentional: an iPhone must never stay trapped on an older cached scanner.
+  if (request.mode === 'navigate' || sameOrigin) {
+    event.respondWith((async () => {
+      try {
+        return await cacheResponse(request, await fetch(request, { cache: 'no-store' }));
+      } catch (_) {
+        return (await caches.match(request)) ||
+          (request.mode === 'navigate' ? ((await caches.match('./index.html')) || (await caches.match('./'))) : Response.error());
+      }
+    })());
     return;
   }
 
+  // CDN scanner dependencies may use cache-first after the first successful load.
   event.respondWith((async () => {
     const cached = await caches.match(request);
     if (cached) {
-      // Refresh in the background while immediately serving the cached copy.
       event.waitUntil(fetch(request).then(r => cacheResponse(request, r)).catch(() => {}));
       return cached;
     }
-    try {
-      return await cacheResponse(request, await fetch(request));
-    } catch (_) {
-      return Response.error();
-    }
+    try { return await cacheResponse(request, await fetch(request)); }
+    catch (_) { return Response.error(); }
   })());
 });

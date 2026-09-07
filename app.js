@@ -299,29 +299,53 @@ async function decodePhotoSource(file){
     return {image:img,width:img.naturalWidth||img.width,height:img.naturalHeight||img.height,cleanup:()=>URL.revokeObjectURL(url)};
   }catch(e){URL.revokeObjectURL(url);throw e}
 }
+function dataUrlToBlobLocal(dataUrl){
+  try{
+    const parts=String(dataUrl||'').split(',');
+    if(parts.length!==2)return null;
+    const mime=(parts[0].match(/^data:([^;]+);base64$/i)||[])[1]||'image/jpeg';
+    const binary=atob(parts[1]),bytes=new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+    return new Blob([bytes],{type:mime});
+  }catch{return null}
+}
+async function canvasToJpegBlobLocal(canvas,quality){
+  let blob=null;
+  if(typeof canvas?.toBlob==='function'){
+    try{
+      blob=await Promise.race([
+        new Promise(resolve=>{try{canvas.toBlob(resolve,'image/jpeg',quality)}catch{resolve(null)}}),
+        new Promise(resolve=>setTimeout(()=>resolve(null),1800))
+      ]);
+    }catch{}
+  }
+  if(blob)return blob;
+  try{return dataUrlToBlobLocal(canvas.toDataURL('image/jpeg',quality))}catch{return null}
+}
 async function compressPhoto(file){
   const decoded=await decodePhotoSource(file);
   try{
-    let w=decoded.width,h=decoded.height;
-    const maxDimension=1440,targetBytes=560*1024,minDimension=720;
+    let w=Number(decoded.width||0),h=Number(decoded.height||0);
+    if(!w||!h)throw new Error('Image dimensions are unavailable.');
+    const maxDimension=1280,targetBytes=500*1024,minDimension=640;
     if(Math.max(w,h)>maxDimension){const scale=maxDimension/Math.max(w,h);w=Math.max(1,Math.round(w*scale));h=Math.max(1,Math.round(h*scale))}
-    let quality=.80,blob=null;
+    let quality=.78,blob=null;
     const canvas=document.createElement('canvas');
     const ctx=canvas.getContext('2d',{alpha:false});
     if(!ctx)throw new Error('Image compression is unavailable on this browser.');
-    for(let pass=0;pass<10;pass++){
+    for(let pass=0;pass<9;pass++){
       canvas.width=w;canvas.height=h;
       ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(decoded.image,0,0,w,h);
-      blob=await new Promise(res=>canvas.toBlob(res,'image/jpeg',quality));
+      blob=await canvasToJpegBlobLocal(canvas,quality);
       if(!blob)throw new Error('Image compression failed.');
       if(blob.size<=targetBytes||Math.max(w,h)<=minDimension)break;
-      if(quality>.52)quality-=.08;else{w=Math.max(1,Math.round(w*.86));h=Math.max(1,Math.round(h*.86));quality=.68}
-      // Yield briefly so mobile Safari/Chrome can repaint and avoid a long CPU lock.
+      if(quality>.54)quality-=.07;else{w=Math.max(1,Math.round(w*.86));h=Math.max(1,Math.round(h*.86));quality=.68}
       await new Promise(resolve=>setTimeout(resolve,0));
     }
+    const result={dataUrl:await blobToDataUrl(blob),size:blob.size,width:w,height:h,compressed:true};
     canvas.width=1;canvas.height=1;
-    return {dataUrl:await blobToDataUrl(blob),size:blob.size,width:w,height:h,compressed:true};
-  }finally{decoded.cleanup?.()}
+    return result;
+  }finally{try{decoded.cleanup?.()}catch{}}
 }
 
 function stickySnapshotText(sticky){return fields.sticky.map(f=>`${f.label}: ${sticky[f.id]||'—'}`).join(' · ')}
@@ -337,13 +361,20 @@ function releaseScannerForNativeCapture(){
   if(scannerCanvas){try{scannerCanvas.width=1;scannerCanvas.height=1}catch{};scannerCanvas=null}
 }
 function openNativeCapture(input,{append=false}={}){
-  if(nativeCaptureBusy)return;
+  if(nativeCaptureBusy||!input)return;
   nativeCaptureBusy=true;appendPhotoMode=append;
   releaseScannerForNativeCapture();
+  // A rendered off-screen input is more reliable than display:none on iPhone.
+  input.hidden=false;input.tabIndex=-1;input.setAttribute('aria-hidden','true');
+  Object.assign(input.style,{position:'fixed',left:'-10000px',top:'0',width:'1px',height:'1px',opacity:'0.001',pointerEvents:'none',zIndex:'-1'});
   try{input.value=''}catch{}
-  // Camera/gallery click must be the first real browser action from this tap.
-  input.click();
-  setTimeout(()=>{nativeCaptureBusy=false},900);
+  try{
+    if(typeof input.showPicker==='function')input.showPicker();
+    else input.click();
+  }catch(error){
+    try{input.click()}catch(second){nativeCaptureBusy=false;toast(`Camera could not open: ${second?.message||error?.message||'browser blocked the picker'}`,5000);return}
+  }
+  setTimeout(()=>{nativeCaptureBusy=false},1800);
 }
 $('takePhotoBtn').onclick=()=>{if(!hasPermission('verification.capture_photo'))return;openNativeCapture($('cameraInput'),{append:false})};
 $('uploadPhotoBtn').onclick=()=>{if(!hasPermission('verification.upload_gallery'))return;openNativeCapture($('galleryInput'),{append:false})};
@@ -351,6 +382,7 @@ $('addCameraPhotoBtn').onclick=()=>openNativeCapture($('cameraInput'),{append:tr
 $('addGalleryPhotosBtn').onclick=()=>openNativeCapture($('galleryInput'),{append:true});
 $('cameraInput').onchange=async e=>{nativeCaptureBusy=false;const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;if(appendPhotoMode)await appendPendingPhotos(files,'camera');else await preparePhotos(files,'camera')};
 $('galleryInput').onchange=async e=>{nativeCaptureBusy=false;const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;if(appendPhotoMode)await appendPendingPhotos(files,'gallery');else await preparePhotos(files,'gallery')};
+$('cameraInput').addEventListener('cancel',()=>{nativeCaptureBusy=false});$('galleryInput').addEventListener('cancel',()=>{nativeCaptureBusy=false});window.addEventListener('focus',()=>setTimeout(()=>{nativeCaptureBusy=false},120));
 
 async function compressFiles(files,source){const list=[...(files||[])].filter(Boolean).slice(0,12);const out=[];for(const file of list){const c=await compressPhoto(file);out.push({id:uid(),dataUrl:c.dataUrl,size:c.size,name:file.name||'photo.jpg',source})}return out}
 function renderPendingPhotoPreview(){const photos=pendingRecord?.photos||[];const has=photos.length>0;$('photoPreviewArea').classList.toggle('hidden',!has);$('photoPreview').classList.toggle('hidden',!has);if(has)$('photoPreview').src=photos[0].dataUrl;$('photoThumbs').innerHTML=photos.map((p,i)=>`<div class="photo-thumb ${i===0?'active':''}"><img src="${p.dataUrl}" alt="Photo ${i+1}"><button type="button" data-remove-pending-photo="${p.id}" aria-label="Remove photo">✕</button><span>${i+1}</span></div>`).join('');document.querySelectorAll('[data-remove-pending-photo]').forEach(b=>b.onclick=()=>{if(!pendingRecord)return;pendingRecord.photos=pendingRecord.photos.filter(p=>String(p.id)!==String(b.dataset.removePendingPhoto));const first=pendingRecord.photos[0];pendingRecord.dataUrl=first?.dataUrl||null;pendingRecord.size=pendingRecord.photos.reduce((n,p)=>n+(p.size||0),0);pendingRecord.photoName=first?.name||'';renderPendingPhotoPreview()})}
@@ -414,6 +446,7 @@ $('discardPhotoBtn').onclick=()=>{pendingRecord=null;appendPhotoMode=false;aiSeq
 function clickedByFromVariable(variable){const f=fields.variable.find(x=>x.systemKey==='clickedBy');return f&&variable[f.id]?variable[f.id]:session.member.id}
 $('savePhotoBtn').onclick=async()=>{
   if(!pendingRecord||!hasPermission('verification.save'))return;
+  if(pendingRecord.source==='scan'&&!(pendingRecord.photos||[]).length){toast('Cannot save a scanned tag without its evidence photo. Please scan again.',5000);return;}
   if(!areCaptureStickyFieldsComplete()){
     toast('Complete all Sticky Fields first. Variable Fields will then appear automatically.',4200);
     updateGuidedCaptureFlow(false);
@@ -526,13 +559,11 @@ function scanDynamicValues(parsedList){
 }
 
 // ---------- Scan & Verify ----------
-// 2.0.6 MOBILE SCANNER ENGINE — ANDROID NATIVE + iOS WASM + SCAN PHOTO EVIDENCE
-// iOS Safari still does not expose BarcodeDetector by default. This scanner
-// therefore uses the ZBar WebAssembly polyfill on iOS. Android/Chromium uses
-// the native BarcodeDetector whenever available, so Android scanning no longer
-// depends on the external WASM engine loading successfully. We own the camera
-// stream ourselves and scan both the full live video and a digitally enlarged
-// centre crop.
+// 2.0.10 MOBILE SCANNER ENGINE
+// iPhone/iPad deliberately uses the native iOS camera capture UI instead of a
+// getUserMedia live stream. This is far more reliable in Safari/PWA mode and
+// still preserves the captured photo as verification evidence. Android/desktop
+// keep the live BarcodeDetector scanner when available.
 function renderScanCodes(){
   const manual=$('manualScanCode').value.trim();
   const all=[...new Set([...scanCodes,...(manual?[manual]:[])])];
@@ -545,10 +576,51 @@ function renderScanCodes(){
   });
 }
 
+function isIOSDevice(){
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent||'') ||
+    (navigator.platform==='MacIntel' && Number(navigator.maxTouchPoints||0)>1);
+}
+
+function cameraErrorMessage(error){
+  const name=String(error?.name||'');
+  const message=String(error?.message||'');
+  if(name==='NotAllowedError'||name==='PermissionDeniedError'){
+    return isIOSDevice()
+      ?'Camera permission is blocked. In Safari open Website Settings for this site, set Camera to Allow, reload, and try again.'
+      :'Camera permission is blocked. Allow Camera for this website in Chrome site settings, then try again.';
+  }
+  if(name==='NotFoundError'||name==='DevicesNotFoundError')return 'No usable camera was found on this device.';
+  if(name==='NotReadableError'||name==='TrackStartError'||name==='AbortError')return 'The camera is busy. Close other camera apps/tabs, wait a few seconds, then try again.';
+  if(name==='OverconstrainedError'||name==='ConstraintNotSatisfiedError')return 'Rear camera mode was not accepted by the browser.';
+  if(name==='SecurityError')return 'The browser blocked camera access. Open PRS2 using its HTTPS GitHub Pages address.';
+  return message||name||'Unknown camera error';
+}
+
+function makePickerRenderable(input){
+  if(!input)return;
+  input.hidden=false;
+  input.tabIndex=-1;
+  input.setAttribute('aria-hidden','true');
+  Object.assign(input.style,{
+    position:'fixed',left:'-10000px',top:'0',width:'1px',height:'1px',
+    opacity:'0.001',pointerEvents:'none',zIndex:'-1'
+  });
+}
+
+function invokePickerNow(input){
+  if(!input)throw new Error('Camera input is unavailable.');
+  makePickerRenderable(input);
+  try{input.value=''}catch{}
+  let firstError=null;
+  if(typeof input.showPicker==='function'){
+    try{input.showPicker();return}catch(error){firstError=error}
+  }
+  try{input.click();return}catch(error){throw firstError||error}
+}
+
 $('scanVerifyBtn').onclick=()=>openScanner();
 $('closeScannerBtn').onclick=closeScanner;
 $('startScannerBtn').onclick=startScanner;
-$('scanImageBtn').onclick=()=>$('scanImageInput').click();
 $('manualScanCode').addEventListener('input',renderScanCodes);
 
 function loadImageElement(file){
@@ -569,9 +641,6 @@ function scannerPolyfillClass(){
 }
 
 function nativeScannerClass(){
-  // BarcodeDetector is not available on every Android/Chrome build, so it is
-  // only the fast path. The app must never fail merely because this API is
-  // absent.
   return typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
 }
 
@@ -579,13 +648,13 @@ function scannerScriptLoaded(url){
   return [...document.scripts].some(s=>s.src===url && s.dataset.prsScannerLoaded==='1');
 }
 
-function loadScannerScript(url,timeoutMs=9000){
+function loadScannerScript(url,timeoutMs=12000){
   return new Promise((resolve,reject)=>{
     if(scannerScriptLoaded(url)){resolve();return}
     const existing=[...document.scripts].find(s=>s.src===url);
     if(existing){
       if(existing.dataset.prsScannerLoaded==='1'){resolve();return}
-      if(existing.dataset.prsScannerFailed==='1'){existing.remove()}
+      if(existing.dataset.prsScannerFailed==='1'){try{existing.remove()}catch{}}
       else{
         const timer=setTimeout(()=>reject(new Error(`Scanner dependency timed out: ${url}`)),timeoutMs);
         existing.addEventListener('load',()=>{clearTimeout(timer);existing.dataset.prsScannerLoaded='1';resolve()},{once:true});
@@ -594,26 +663,14 @@ function loadScannerScript(url,timeoutMs=9000){
       }
     }
     const script=document.createElement('script');
-    script.src=url;
-    script.async=true;
-    script.crossOrigin='anonymous';
-    script.dataset.prsScannerRuntime='1';
+    script.src=url;script.async=true;script.crossOrigin='anonymous';script.dataset.prsScannerRuntime='1';
     const timer=setTimeout(()=>{
       script.dataset.prsScannerFailed='1';
       try{script.remove()}catch{}
       reject(new Error(`Scanner dependency timed out: ${url}`));
     },timeoutMs);
-    script.onload=()=>{
-      clearTimeout(timer);
-      script.dataset.prsScannerLoaded='1';
-      resolve();
-    };
-    script.onerror=()=>{
-      clearTimeout(timer);
-      script.dataset.prsScannerFailed='1';
-      try{script.remove()}catch{}
-      reject(new Error(`Scanner dependency failed: ${url}`));
-    };
+    script.onload=()=>{clearTimeout(timer);script.dataset.prsScannerLoaded='1';resolve()};
+    script.onerror=()=>{clearTimeout(timer);script.dataset.prsScannerFailed='1';try{script.remove()}catch{};reject(new Error(`Scanner dependency failed: ${url}`))};
     document.head.appendChild(script);
   });
 }
@@ -638,9 +695,7 @@ async function ensureScannerFallbackEngine(){
       ['https://unpkg.com','unpkg']
     ];
     for(const [base,label] of attempts){
-      try{return await loadScannerPair(base,label)}catch(error){
-        console.warn(`Scanner ${label} load failed`,error);
-      }
+      try{return await loadScannerPair(base,label)}catch(error){console.warn(`Scanner ${label} load failed`,error)}
     }
     for(const url of [
       'https://cdn.jsdelivr.net/npm/@undecaf/barcode-detector-polyfill@0.9.23/dist/main.js',
@@ -656,7 +711,7 @@ async function ensureScannerFallbackEngine(){
         }
       }catch(error){console.warn('Scanner module fallback failed',url,error)}
     }
-    throw new Error('The QR / barcode decoder could not be loaded. Check internet access once, then retry Start Camera.');
+    throw new Error('QR / barcode recognition could not load. You can still enter the code manually; the captured photo will remain attached.');
   })();
   try{return await scannerEngineLoadPromise}
   finally{if(!scannerPolyfillClass())scannerEngineLoadPromise=null}
@@ -685,15 +740,150 @@ function scanRawValue(item){
   return String(item?.rawValue ?? item?.raw_value ?? item?.text ?? '').trim();
 }
 
-async function detectWithScannerDetector(source){
-  if(!scannerDetector)return '';
-  const results=await scannerDetector.detect(source);
-  if(!Array.isArray(results)||!results.length)return '';
-  for(const result of results){
+function scannerResultsValues(results){
+  const out=[];
+  for(const result of results||[]){
     const value=scanRawValue(result);
-    if(value)return value;
+    if(value&&!out.includes(value))out.push(value);
   }
-  return '';
+  return out;
+}
+
+async function detectWithDetector(detector,source){
+  if(!detector)return [];
+  const results=await detector.detect(source);
+  return scannerResultsValues(results);
+}
+
+async function detectWithScannerDetector(source){
+  const values=await detectWithDetector(scannerDetector,source);
+  return values[0]||'';
+}
+
+function imagePassCanvas(img,{contrast=false,crop=.0}={}){
+  const iw=Number(img.naturalWidth||img.width||0),ih=Number(img.naturalHeight||img.height||0);
+  if(!iw||!ih)return null;
+  const cropRatio=crop>0&&crop<1?crop:1;
+  const sw=Math.max(1,Math.round(iw*cropRatio)),sh=Math.max(1,Math.round(ih*cropRatio));
+  const sx=Math.max(0,Math.round((iw-sw)/2)),sy=Math.max(0,Math.round((ih-sh)/2));
+  const maxSide=1600;
+  const scale=Math.min(1,maxSide/Math.max(sw,sh));
+  const w=Math.max(1,Math.round(sw*scale)),h=Math.max(1,Math.round(sh*scale));
+  const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});
+  if(!ctx)return null;
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
+  ctx.save();ctx.filter=contrast?'grayscale(1) contrast(1.8)':'none';
+  ctx.drawImage(img,sx,sy,sw,sh,0,0,w,h);ctx.restore();
+  return canvas;
+}
+
+async function detectCodesFromImageFile(file){
+  let detector=null;
+  try{detector=await createScannerDetector()}catch(error){
+    console.warn('Still-image barcode decoder unavailable:',error);
+    return [];
+  }
+  let item=null;
+  const found=[];
+  try{
+    item=await loadImageElement(file);
+    const push=vals=>{for(const v of vals||[])if(v&&!found.includes(v))found.push(v)};
+    try{push(await detectWithDetector(detector,item.img))}catch(error){console.debug('Direct image decode failed',error)}
+    if(found.length)return found;
+    for(const opts of [
+      {contrast:false,crop:1},
+      {contrast:true,crop:1},
+      {contrast:false,crop:.82},
+      {contrast:true,crop:.82}
+    ]){
+      const canvas=imagePassCanvas(item.img,opts);
+      if(!canvas)continue;
+      try{push(await detectWithDetector(detector,canvas))}catch(error){console.debug('Prepared image decode failed',error)}
+      canvas.width=1;canvas.height=1;
+      if(found.length)break;
+      await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    return found;
+  }finally{
+    if(item?.url)try{URL.revokeObjectURL(item.url)}catch{}
+  }
+}
+
+function showCapturedScanPhoto(file){
+  const root=$('qrReader');
+  if(!root||!file)return;
+  const url=URL.createObjectURL(file);
+  root.innerHTML=`<div style="position:relative;width:100%;min-height:280px;background:#050914;border-radius:14px;overflow:hidden;display:flex;align-items:center;justify-content:center;"><img id="prsIOSScanPhoto" alt="Captured scan evidence" style="display:block;max-width:100%;max-height:min(58vh,520px);object-fit:contain;"><div style="position:absolute;left:10px;right:10px;bottom:10px;padding:7px 9px;background:rgba(0,0,0,.58);border-radius:8px;text-align:center;color:#fff;font-size:12px;font-weight:700;">Evidence photo captured</div></div>`;
+  const img=$('prsIOSScanPhoto');
+  if(img){img.onload=()=>setTimeout(()=>{try{URL.revokeObjectURL(url)}catch{}},1000);img.onerror=()=>{try{URL.revokeObjectURL(url)}catch{}};img.src=url}
+}
+
+let iosScanCameraInput=null;
+let iosScanCaptureBusy=false;
+
+function ensureIOSScanCameraInput(){
+  if(iosScanCameraInput&&document.body.contains(iosScanCameraInput))return iosScanCameraInput;
+  const input=document.createElement('input');
+  input.type='file';input.accept='image/*';input.setAttribute('capture','environment');input.id='prsIOSScanCameraInput';
+  makePickerRenderable(input);
+  input.addEventListener('cancel',()=>{
+    iosScanCaptureBusy=false;
+    $('startScannerBtn').disabled=false;
+    $('startScannerBtn').textContent='Open Camera & Scan';
+    const label=$('iosScanCameraLabel');if(label)label.textContent='Open Camera & Scan';
+    $('scanStatus').textContent='Camera closed without a photo. Tap Open Camera & Scan to try again.';
+  });
+  input.addEventListener('change',async e=>{
+    iosScanCaptureBusy=false;
+    const file=e.target.files?.[0]||null;
+    try{e.target.value=''}catch{}
+    const button=$('startScannerBtn');button.disabled=false;button.textContent='Retake Camera';const label=$('iosScanCameraLabel');if(label)label.textContent='Retake Camera';
+    if(!file){$('scanStatus').textContent='No photo was captured. Tap Open Camera & Scan to try again.';return}
+
+    scanEvidenceFiles=[file];
+    showCapturedScanPhoto(file);
+    $('scanStatus').textContent='Photo captured. Reading QR / barcode…';
+    let codes=[];
+    try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('iPhone captured-image scan failed:',error)}
+    if(codes.length){
+      scanCodes=[...new Set(codes)];
+      $('manualScanCode').value=scanCodes[0]||'';
+      renderScanCodes();
+      scannerAutoProceed=true;
+      $('scanStatus').textContent=`Code detected: ${scanCodes[0]}. Photo attached. Opening verification…`;
+      try{navigator.vibrate?.(100)}catch{}
+      const finalCodes=[...scanCodes];
+      await closeScanner();
+      await prepareScanRecord(finalCodes,[file]);
+      return;
+    }
+    scannerAutoProceed=false;
+    renderScanCodes();
+    $('scanStatus').textContent='Photo captured, but the code was not read automatically. Retake closer/sharper, or enter the code manually and tap Use Code(s) & Verify. This photo is already attached.';
+  });
+  document.body.appendChild(input);
+  iosScanCameraInput=input;
+  return input;
+}
+
+function startIOSNativeScanCamera(){
+  if(iosScanCaptureBusy)return;
+  const button=$('startScannerBtn');
+  const input=ensureIOSScanCameraInput();
+  iosScanCaptureBusy=true;
+  scannerAutoProceed=false;
+  button.disabled=true;button.textContent='Opening Camera…';
+  $('scanStatus').textContent='Opening iPhone rear camera… take a clear photo with the complete QR / barcode visible.';
+  try{
+    invokePickerNow(input);
+    // Safari returns control after the camera UI closes. A timer only prevents a
+    // permanently disabled button if the browser does not fire cancel/change.
+    setTimeout(()=>{if(iosScanCaptureBusy){iosScanCaptureBusy=false;button.disabled=false;button.textContent='Open Camera & Scan'}},5000);
+  }catch(error){
+    iosScanCaptureBusy=false;button.disabled=false;button.textContent='Open Camera & Scan';
+    $('scanStatus').textContent=`iPhone camera could not open. ${cameraErrorMessage(error)}`;
+  }
 }
 
 $('scanImageInput').onchange=async e=>{
@@ -701,397 +891,270 @@ $('scanImageInput').onchange=async e=>{
   e.target.value='';
   if(!files.length)return;
   scanEvidenceFiles=[...scanEvidenceFiles,...files].slice(0,12);
-  let detector=null;
-  try{detector=await createScannerDetector()}catch(error){
-    console.error(error);
-    toast(error.message||'Scanner decoder is unavailable.',4200);
-    return;
-  }
   let found=0;
   for(const f of files){
-    let item=null;
     try{
-      item=await loadImageElement(f);
-      const results=await detector.detect(item.img);
-      for(const result of results||[]){
-        const code=scanRawValue(result);
-        if(code&&!scanCodes.includes(code)){scanCodes.push(code);found++}
-      }
-    }catch(error){
-      console.debug('Image scan did not find a code:',error?.name||error?.message||error);
-    }finally{
-      if(item?.url)URL.revokeObjectURL(item.url);
-    }
+      const codes=await detectCodesFromImageFile(f);
+      for(const code of codes){if(code&&!scanCodes.includes(code)){scanCodes.push(code);found++}}
+    }catch(error){console.debug('Image scan did not find a code:',error?.name||error?.message||error)}
   }
+  if(scanCodes.length&&!$('manualScanCode').value.trim())$('manualScanCode').value=scanCodes[0];
   renderScanCodes();
   $('scanStatus').textContent=found
-    ?`${found} new code${found===1?'':'s'} detected.`
-    :'No readable QR / barcode found. Try a closer, sharper image.';
+    ?`${found} new code${found===1?'':'s'} detected. Image evidence attached.`
+    :'Image evidence attached, but no readable QR / barcode was found. Enter the code manually or choose a sharper image.';
+};
+
+$('scanImageBtn').onclick=()=>{
+  const input=$('scanImageInput');
+  makePickerRenderable(input);
+  try{input.removeAttribute('capture')}catch{}
+  try{invokePickerNow(input)}catch(error){toast(`Image picker could not open: ${error?.message||error}`,4500)}
 };
 
 $('useScanCodeBtn').onclick=async()=>{
   const manual=$('manualScanCode').value.trim();
   const codes=[...new Set([...scanCodes,...(manual?[manual]:[])])];
   if(!codes.length){toast('Scan or enter at least one code first.');return}
+
+  let evidence=[...scanEvidenceFiles].filter(Boolean);
+  if(!evidence.length&&scannerRunning){
+    $('scanStatus').textContent='Capturing evidence photo from the live scanner…';
+    for(let attempt=0;attempt<3&&!evidence.length;attempt++){
+      const photo=await captureScannerEvidenceFile();
+      if(photo)evidence=[photo];
+      else await new Promise(resolve=>setTimeout(resolve,100+attempt*100));
+    }
+    if(evidence.length)scanEvidenceFiles=[...evidence];
+  }
+  if(!evidence.length){
+    scannerAutoProceed=false;
+    toast('A photo is compulsory for every scanned tag.',4500);
+    $('scanStatus').textContent=isIOSDevice()
+      ?'No evidence photo exists yet. Tap Open Camera & Scan, take the photo, then scan/enter the code.'
+      :'No evidence photo was captured. Keep the camera open and try Use Code(s) & Verify again, or use Scan Image.';
+    return;
+  }
   await closeScanner();
-  await prepareScanRecord(codes,scanEvidenceFiles);
+  await prepareScanRecord(codes,evidence);
 };
 
 function openScanner(){
   if(!hasPermission('verification.scan'))return;
-  scanCodes=[];
-  scanEvidenceFiles=[];
-  scannerAutoProceed=false;
-  scannerFrameCount=0;
-  $('manualScanCode').value='';
-  $('scanStatus').textContent='Tap Start Camera. Point the rear camera at the QR / barcode; it will be captured automatically.';
-  renderScanCodes();
-  $('qrReader').innerHTML='';
+  scanCodes=[];scanEvidenceFiles=[];scannerAutoProceed=false;scannerFrameCount=0;
+  $('manualScanCode').value='';renderScanCodes();$('qrReader').innerHTML='';
   $('scannerModal').classList.remove('hidden');
-  $('startScannerBtn').textContent='Start Camera';
-  $('startScannerBtn').disabled=false;
-}
-
-function isIOSDevice(){
-  return /iPhone|iPad|iPod/i.test(navigator.userAgent||'') ||
-    (navigator.platform==='MacIntel' && Number(navigator.maxTouchPoints||0)>1);
-}
-
-function cameraErrorMessage(error){
-  const name=String(error?.name||'');
-  const message=String(error?.message||'');
-  if(name==='NotAllowedError'||name==='PermissionDeniedError'){
-    return isIOSDevice()
-      ?'Camera permission is blocked. In Safari open Website Settings for this site, set Camera to Allow, reload, and try again.'
-      :'Camera permission is blocked. Allow Camera for this website in Chrome site settings, then try again.';
+  const ios=isIOSDevice();
+  const startBtn=$('startScannerBtn');
+  const iosLabel=$('iosScanCameraLabel');
+  if(ios){
+    // Create the real capture input before the user taps the label. The label is
+    // directly associated with this file input, so iOS receives a genuine user
+    // activation instead of a synthetic input.click().
+    ensureIOSScanCameraInput();
+    startBtn.hidden=true;
+    if(iosLabel){iosLabel.hidden=false;iosLabel.textContent='Open Camera & Scan'}
+    $('scanStatus').textContent='iPhone scanner ready (V2 Patch 10). Tap Open Camera & Scan, take a clear photo of the complete QR / barcode, and the same photo will be saved as evidence.';
+    // Warm the decoder in the background. This never blocks the native camera.
+    if(navigator.onLine&&!nativeScannerClass()&&!scannerPolyfillClass())setTimeout(()=>ensureScannerFallbackEngine().catch(error=>console.warn('Scanner warm-up failed',error)),0);
+  }else{
+    startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
+    if(iosLabel)iosLabel.hidden=true;
+    $('scanStatus').textContent='Tap Start Camera. Point the rear camera at the QR / barcode; it will be captured automatically.';
   }
-  if(name==='NotFoundError'||name==='DevicesNotFoundError')return 'No usable camera was found on this device.';
-  if(name==='NotReadableError'||name==='TrackStartError'||name==='AbortError')return 'The camera is busy. Close other camera apps/tabs, wait a few seconds, then try again.';
-  if(name==='OverconstrainedError'||name==='ConstraintNotSatisfiedError')return 'Rear camera mode was not accepted by the browser.';
-  if(name==='SecurityError')return 'The browser blocked camera access. Open PRS2 using its HTTPS GitHub Pages address.';
-  return message||name||'Unknown camera error';
+}
+
+function dataUrlToBlobForScanner(dataUrl){
+  try{
+    const parts=String(dataUrl||'').split(',');if(parts.length!==2)return null;
+    const mime=(parts[0].match(/^data:([^;]+);base64$/i)||[])[1]||'image/jpeg';
+    const binary=atob(parts[1]),bytes=new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+    return new Blob([bytes],{type:mime});
+  }catch{return null}
+}
+
+async function canvasToJpegBlobForScanner(canvas,quality=.76){
+  let blob=null;
+  if(typeof canvas?.toBlob==='function'){
+    blob=await Promise.race([
+      new Promise(resolve=>{try{canvas.toBlob(resolve,'image/jpeg',quality)}catch{resolve(null)}}),
+      new Promise(resolve=>setTimeout(()=>resolve(null),1800))
+    ]);
+  }
+  if(blob)return blob;
+  try{return dataUrlToBlobForScanner(canvas.toDataURL('image/jpeg',quality))}catch{return null}
 }
 
 async function captureScannerEvidenceFile(){
   const video=$('prsMobileScanVideo');
   if(!video||video.readyState<2||!video.videoWidth||!video.videoHeight)return null;
   try{
-    const srcW=video.videoWidth,srcH=video.videoHeight;
-    const maxSide=1280;
-    const scale=Math.min(1,maxSide/Math.max(srcW,srcH));
-    const w=Math.max(1,Math.round(srcW*scale));
-    const h=Math.max(1,Math.round(srcH*scale));
-    const canvas=document.createElement('canvas');
-    canvas.width=w;canvas.height=h;
-    const ctx=canvas.getContext('2d',{alpha:false});
-    if(!ctx)return null;
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
-    ctx.drawImage(video,0,0,w,h);
-    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.78));
-    if(!blob)return null;
+    const srcW=video.videoWidth,srcH=video.videoHeight,maxSide=1024;
+    const scale=Math.min(1,maxSide/Math.max(srcW,srcH)),w=Math.max(1,Math.round(srcW*scale)),h=Math.max(1,Math.round(srcH*scale));
+    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+    const ctx=canvas.getContext('2d',{alpha:false});if(!ctx)return null;
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(video,0,0,w,h);
+    const blob=await canvasToJpegBlobForScanner(canvas,.76);canvas.width=1;canvas.height=1;
+    if(!blob||!blob.size)return null;
     const name=`scan-${new Date().toISOString().replace(/[:.]/g,'-')}.jpg`;
-    try{return new File([blob],name,{type:'image/jpeg',lastModified:Date.now()})}
-    catch{blob.name=name;return blob}
-  }catch(error){
-    console.warn('Could not capture scanner evidence frame:',error);
-    return null;
-  }
+    try{return new File([blob],name,{type:'image/jpeg',lastModified:Date.now()})}catch{try{blob.name=name}catch{};return blob}
+  }catch(error){console.warn('Could not capture scanner evidence frame:',error);return null}
 }
 
 function handleScannerDecoded(decoded){
   const value=String(decoded||'').trim();
   if(!value||scannerAutoProceed)return;
-  scannerAutoProceed=true;
-  scanCodes=[value];
-  $('manualScanCode').value=value;
-  renderScanCodes();
+  scannerAutoProceed=true;scanCodes=[value];$('manualScanCode').value=value;renderScanCodes();
   try{navigator.vibrate?.(100)}catch{}
   $('scanStatus').textContent=`Code detected: ${value}. Capturing evidence photo…`;
-
-  // Capture the exact live camera frame that successfully produced the code
-  // BEFORE stopping the camera. That image is stored with the verification
-  // and therefore appears in the "With Photos" Excel export as well.
   (async()=>{
     try{
-      const evidence=await captureScannerEvidenceFile();
-      if(evidence)scanEvidenceFiles=[evidence,...scanEvidenceFiles].slice(0,12);
-      $('scanStatus').textContent=evidence
-        ?`Code detected: ${value}. Photo captured. Auto-filling verification fields…`
-        :`Code detected: ${value}. Auto-filling verification fields…`;
-      await stopScanner({preserveStatus:true});
-      $('scannerModal').classList.add('hidden');
+      let evidence=null;
+      for(let attempt=0;attempt<3&&!evidence;attempt++){
+        evidence=await captureScannerEvidenceFile();
+        if(!evidence)await new Promise(resolve=>setTimeout(resolve,100+attempt*90));
+      }
+      if(!evidence){
+        scannerAutoProceed=false;
+        $('scanStatus').textContent=`Code detected: ${value}, but the evidence photo was not captured. Keep the camera open and tap Use Code(s) & Verify to retry.`;
+        return;
+      }
+      scanEvidenceFiles=[evidence,...scanEvidenceFiles].slice(0,12);
+      $('scanStatus').textContent=`Code detected: ${value}. Photo captured. Opening verification…`;
+      await stopScanner({preserveStatus:true});$('scannerModal').classList.add('hidden');
       await prepareScanRecord([value],scanEvidenceFiles);
-    }catch(error){
-      console.error('Automatic scan continuation failed:',error);
-      scannerAutoProceed=false;
-      $('scanStatus').textContent='The code was read but the form could not open. Tap Use Code(s) & Verify.';
-    }
+    }catch(error){console.error('Automatic scan continuation failed:',error);scannerAutoProceed=false;$('scanStatus').textContent='The code was read but verification could not open. Tap Use Code(s) & Verify.'}
   })();
 }
 
 function buildScannerVideo(){
   const root=$('qrReader');
-  root.innerHTML=`
-    <div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;">
-      <video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted
-        style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video>
-      <div style="position:absolute;left:8%;right:8%;top:20%;bottom:20%;border:3px solid rgba(255,255,255,.98);border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.14);pointer-events:none;"></div>
-      <div style="position:absolute;left:0;right:0;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Keep the complete QR / barcode inside the box</div>
-    </div>`;
+  root.innerHTML=`<div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;"><video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video><div style="position:absolute;left:8%;right:8%;top:20%;bottom:20%;border:3px solid rgba(255,255,255,.98);border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.14);pointer-events:none;"></div><div style="position:absolute;left:0;right:0;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Keep the complete QR / barcode inside the box</div></div>`;
   return $('prsMobileScanVideo');
 }
 
 function stopTracksSynchronously(){
-  try{
-    if(scannerStream?.getTracks){
-      for(const track of scannerStream.getTracks())try{track.stop()}catch{}
-    }
-  }catch{}
+  try{if(scannerStream?.getTracks)for(const track of scannerStream.getTracks())try{track.stop()}catch{}}catch{}
   scannerStream=null;
-  const old=$('prsMobileScanVideo');
-  if(old){try{old.pause()}catch{};try{old.srcObject=null}catch{}}
+  const old=$('prsMobileScanVideo');if(old){try{old.pause()}catch{};try{old.srcObject=null}catch{}}
 }
 
 async function tuneMobileCamera(video){
   try{
-    const track=video?.srcObject?.getVideoTracks?.()[0];
-    if(!track)return;
+    const track=video?.srcObject?.getVideoTracks?.()[0];if(!track)return;
     const caps=track.getCapabilities?.()||{};
-    if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous')){
-      try{await track.applyConstraints({advanced:[{focusMode:'continuous'}]})}catch{}
-    }
-    // Do not force zoom on iPhone: Safari may satisfy it digitally and make
-    // close asset labels harder to focus. The centre-crop pass below provides
-    // a decoder-side zoom without disturbing camera focus.
-  }catch(error){
-    console.debug('Optional camera tuning unavailable:',error);
-  }
+    if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))try{await track.applyConstraints({advanced:[{focusMode:'continuous'}]})}catch{}
+  }catch(error){console.debug('Optional camera tuning unavailable:',error)}
 }
 
-function waitForVideoReady(video,timeoutMs=5000){
+function waitForVideoReady(video,timeoutMs=6500){
   return new Promise((resolve,reject)=>{
     if(video.readyState>=2&&video.videoWidth>0&&video.videoHeight>0){resolve();return}
     let done=false;
-    const finish=(ok,error)=>{
-      if(done)return;done=true;
-      clearTimeout(timer);
-      video.removeEventListener('loadedmetadata',onReady);
-      video.removeEventListener('canplay',onReady);
-      ok?resolve():reject(error||new Error('Camera preview did not become ready'));
-    };
+    const finish=(ok,error)=>{if(done)return;done=true;clearTimeout(timer);video.removeEventListener('loadedmetadata',onReady);video.removeEventListener('canplay',onReady);ok?resolve():reject(error||new Error('Camera preview did not become ready'))};
     const onReady=()=>{if(video.videoWidth>0&&video.videoHeight>0)finish(true)};
-    video.addEventListener('loadedmetadata',onReady);
-    video.addEventListener('canplay',onReady);
+    video.addEventListener('loadedmetadata',onReady);video.addEventListener('canplay',onReady);
     const timer=setTimeout(()=>finish(false,new Error('Camera preview timed out')),timeoutMs);
   });
 }
 
 function scannerCrop(video,contrast=false){
-  const vw=Number(video.videoWidth||0),vh=Number(video.videoHeight||0);
-  if(!vw||!vh)return null;
+  const vw=Number(video.videoWidth||0),vh=Number(video.videoHeight||0);if(!vw||!vh)return null;
   if(!scannerCanvas)scannerCanvas=document.createElement('canvas');
-  // Crop to the central 72% of the camera frame and upscale it. This is a
-  // digital decoder zoom for small asset stickers such as the supplied tag.
-  const cropW=Math.max(1,Math.floor(vw*0.72));
-  const cropH=Math.max(1,Math.floor(vh*0.72));
-  const sx=Math.floor((vw-cropW)/2),sy=Math.floor((vh-cropH)/2);
-  const maxSide=900;
-  const scale=Math.min(maxSide/cropW,maxSide/cropH,1.8);
-  const outW=Math.max(320,Math.floor(cropW*scale));
-  const outH=Math.max(320,Math.floor(cropH*scale));
-  scannerCanvas.width=outW;
-  scannerCanvas.height=outH;
+  const cropW=Math.max(1,Math.floor(vw*.72)),cropH=Math.max(1,Math.floor(vh*.72));
+  const sx=Math.floor((vw-cropW)/2),sy=Math.floor((vh-cropH)/2),maxSide=900,scale=Math.min(maxSide/cropW,maxSide/cropH,1.8);
+  const outW=Math.max(320,Math.floor(cropW*scale)),outH=Math.max(320,Math.floor(cropH*scale));
+  scannerCanvas.width=outW;scannerCanvas.height=outH;
   const ctx=scannerCanvas.getContext('2d',{willReadFrequently:true});
-  ctx.save();
-  ctx.filter=contrast?'grayscale(1) contrast(1.65)':'none';
-  ctx.drawImage(video,sx,sy,cropW,cropH,0,0,outW,outH);
-  ctx.restore();
+  ctx.save();ctx.filter=contrast?'grayscale(1) contrast(1.65)':'none';ctx.drawImage(video,sx,sy,cropW,cropH,0,0,outW,outH);ctx.restore();
   return scannerCanvas;
 }
 
 async function scanOneLiveFrame(){
   if(!scannerRunning||scannerScanBusy||scannerAutoProceed)return;
-  const video=$('prsMobileScanVideo');
-  if(!video||video.readyState<2||!video.videoWidth)return;
-  scannerScanBusy=true;
-  scannerFrameCount++;
+  const video=$('prsMobileScanVideo');if(!video||video.readyState<2||!video.videoWidth)return;
+  scannerScanBusy=true;scannerFrameCount++;
   try{
-    // Mobile stability: decode the smaller centre crop first. Running the WASM
-    // decoder against a full 1080p frame many times per second can spike CPU /
-    // memory and make Safari/Chrome terminate or stall camera work.
-    let value='';
-    const crop=scannerCrop(video,false);
-    if(crop)value=await detectWithScannerDetector(crop);
-    // Full frame only periodically in case the code is slightly outside centre.
+    let value='';const crop=scannerCrop(video,false);if(crop)value=await detectWithScannerDetector(crop);
     if(!value&&scannerFrameCount%4===0)value=await detectWithScannerDetector(video);
-    // Contrast pass is useful, but expensive; run it only every sixth frame.
-    if(!value&&scannerFrameCount%6===0){
-      const contrastCrop=scannerCrop(video,true);
-      if(contrastCrop)value=await detectWithScannerDetector(contrastCrop);
-    }
+    if(!value&&scannerFrameCount%6===0){const contrastCrop=scannerCrop(video,true);if(contrastCrop)value=await detectWithScannerDetector(contrastCrop)}
     if(value){handleScannerDecoded(value);return}
-
     const elapsed=(Date.now()-scannerStartedAt)/1000;
-    if(scannerFrameCount%10===0&&!scannerAutoProceed){
-      $('scanStatus').textContent=elapsed>8
-        ?'Camera is scanning continuously. Move the QR closer until it fills roughly one-third of the box and hold steady.'
-        :`Camera live • scanning… (${scannerFrameCount} frames analysed)`;
-    }
-  }catch(error){
-    console.debug('Mobile barcode frame decode:',error?.name||error?.message||error);
-  }finally{
-    scannerScanBusy=false;
-  }
+    if(scannerFrameCount%10===0&&!scannerAutoProceed)$('scanStatus').textContent=elapsed>8?'Camera is scanning continuously. Move the QR closer until it fills roughly one-third of the box and hold steady.':`Camera live • scanning… (${scannerFrameCount} frames analysed)`;
+  }catch(error){console.debug('Mobile barcode frame decode:',error?.name||error?.message||error)}finally{scannerScanBusy=false}
 }
 
 function scheduleScannerLoop(delay=170){
-  clearTimeout(scannerLoopTimer);
-  if(!scannerRunning)return;
-  scannerLoopTimer=setTimeout(async()=>{
-    await scanOneLiveFrame();
-    scheduleScannerLoop(170);
-  },delay);
+  clearTimeout(scannerLoopTimer);if(!scannerRunning)return;
+  scannerLoopTimer=setTimeout(async()=>{await scanOneLiveFrame();scheduleScannerLoop(170)},delay);
 }
 
 async function startScanner(){
+  // IMPORTANT: iPhone uses native capture. This call remains fully synchronous
+  // until the picker is opened, preserving Safari's required user gesture.
+  if(isIOSDevice()){
+    startIOSNativeScanCamera();
+    return;
+  }
   if(scannerRunning){await stopScanner();return}
-  if(!window.isSecureContext){
-    $('scanStatus').textContent='Camera requires HTTPS. Open the PRS2 GitHub Pages website.';
-    return;
-  }
-  if(!navigator.mediaDevices?.getUserMedia){
-    $('scanStatus').textContent='Live camera is unavailable. Use current Safari on iPhone or Chrome on Android.';
-    return;
-  }
-  const button=$('startScannerBtn');
-  button.disabled=true;
-  button.textContent='Opening Camera…';
-  $('scanStatus').textContent='Opening rear camera… allow Camera permission if prompted.';
-  scannerAutoProceed=false;
-  scannerScanBusy=false;
-  scannerFrameCount=0;
-
-  // IMPORTANT FOR iOS: getUserMedia is called immediately from the button's
-  // user gesture. Do not put an unrelated await before this call.
+  if(!window.isSecureContext){$('scanStatus').textContent='Camera requires HTTPS. Open the PRS2 GitHub Pages website.';return}
+  if(!navigator.mediaDevices?.getUserMedia){$('scanStatus').textContent='Live camera is unavailable. Use Scan Image or enter the code manually.';return}
+  const button=$('startScannerBtn');button.disabled=true;button.textContent='Opening Camera…';$('scanStatus').textContent='Opening rear camera… allow Camera permission if prompted.';
+  scannerAutoProceed=false;scannerScanBusy=false;scannerFrameCount=0;
   let stream;
   try{
-    stopTracksSynchronously();
-    clearTimeout(scannerLoopTimer);
-    const constraints={
-      audio:false,
-      video:{
-        facingMode:{ideal:'environment'},
-        width:{ideal:1280},
-        height:{ideal:720},
-        frameRate:{ideal:24,max:30}
-      }
-    };
-    stream=await navigator.mediaDevices.getUserMedia(constraints);
+    stopTracksSynchronously();clearTimeout(scannerLoopTimer);
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}})}
+    catch(error){if(String(error?.name||'')==='OverconstrainedError')stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});else throw error}
     scannerStream=stream;
-
-    const video=buildScannerVideo();
-    video.srcObject=stream;
-    video.muted=true;
-    video.setAttribute('playsinline','');
-    video.setAttribute('webkit-playsinline','');
-    await waitForVideoReady(video);
-    try{await video.play()}catch{}
-    await tuneMobileCamera(video);
-
-    $('scanStatus').textContent='Camera is live. Preparing QR / barcode recognition…';
-    scannerDetector=await createScannerDetector();
-    scannerRunning=true;
-    scannerStartedAt=Date.now();
-    button.disabled=false;
-    button.textContent='Stop Camera';
-    $('scanStatus').textContent=`Camera is live and scanning automatically${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the QR / barcode steady inside the box.`;
-    scheduleScannerLoop(140);
+    const video=buildScannerVideo();video.srcObject=stream;video.muted=true;video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');
+    try{const p=video.play();p?.catch?.(()=>{})}catch{}
+    await waitForVideoReady(video);tuneMobileCamera(video).catch(()=>{});
+    scannerRunning=true;scannerStartedAt=Date.now();button.disabled=false;button.textContent='Stop Camera';$('scanStatus').textContent='Camera is live. Preparing QR / barcode recognition…';
+    try{scannerDetector=await createScannerDetector()}catch(error){scannerDetector=null;console.error('Scanner decoder failed while camera stayed open:',error)}
+    if(!scannerRunning)return;
+    if(!scannerDetector){$('scanStatus').textContent='Camera is live but automatic recognition could not load. Enter the code manually and tap Use Code(s) & Verify; the evidence photo will be captured from the live camera.';return}
+    $('scanStatus').textContent=`Camera is live and scanning automatically${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the QR / barcode steady inside the box.`;scheduleScannerLoop(180);
   }catch(error){
-    console.error('Mobile scanner start failed:',error);
-    scannerRunning=false;
-    scannerScanBusy=false;
-    scannerDetector=null;
-    clearTimeout(scannerLoopTimer);
-    scannerLoopTimer=null;
-    if(stream?.getTracks)for(const track of stream.getTracks())try{track.stop()}catch{}
-    stopTracksSynchronously();
-    $('qrReader').innerHTML='';
-    button.disabled=false;
-    button.textContent='Start Camera';
-    const msg=String(error?.message||'');
-    $('scanStatus').textContent=/decoder|dependency|BarcodeDetectorPolyfill|scanner engine/i.test(msg)
-      ?`Camera opened, but QR / barcode recognition could not initialise. ${msg}`
-      :`Camera scanner could not start. ${cameraErrorMessage(error)}`;
+    console.error('Mobile scanner start failed:',error);scannerRunning=false;scannerScanBusy=false;scannerDetector=null;clearTimeout(scannerLoopTimer);scannerLoopTimer=null;
+    if(stream?.getTracks)for(const track of stream.getTracks())try{track.stop()}catch{};stopTracksSynchronously();$('qrReader').innerHTML='';button.disabled=false;button.textContent='Start Camera';$('scanStatus').textContent=`Camera scanner could not start. ${cameraErrorMessage(error)}`;
   }
 }
 
 async function stopScanner(options={}){
-  const button=$('startScannerBtn');
-  clearTimeout(scannerLoopTimer);
-  scannerLoopTimer=null;
-  scannerRunning=false;
-  scannerScanBusy=false;
-  scannerDetector=null;
-  stopTracksSynchronously();
+  const button=$('startScannerBtn');clearTimeout(scannerLoopTimer);scannerLoopTimer=null;scannerRunning=false;scannerScanBusy=false;scannerDetector=null;stopTracksSynchronously();
   if(scannerCanvas){try{scannerCanvas.width=1;scannerCanvas.height=1}catch{};scannerCanvas=null}
-  $('qrReader').innerHTML='';
-  if(button){button.disabled=false;button.textContent='Start Camera'}
-  if(!options.preserveStatus&&!$('scannerModal').classList.contains('hidden')){
-    $('scanStatus').textContent=scanCodes.length
-      ?`${scanCodes.length} code${scanCodes.length===1?'':'s'} captured.`
-      :'Camera stopped. Tap Start Camera to scan again.';
-  }
+  if(!isIOSDevice())$('qrReader').innerHTML='';
+  if(button){button.disabled=false;button.textContent=isIOSDevice()?'Open Camera & Scan':'Start Camera';button.hidden=isIOSDevice()}const iosLabel=$('iosScanCameraLabel');if(iosLabel){iosLabel.hidden=!isIOSDevice();if(isIOSDevice())iosLabel.textContent='Open Camera & Scan'}
+  if(!options.preserveStatus&&!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=scanCodes.length?`${scanCodes.length} code${scanCodes.length===1?'':'s'} captured.`:(isIOSDevice()?'Tap Open Camera & Scan to capture the tag.':'Camera stopped. Tap Start Camera to scan again.');
 }
 
 async function closeScanner(){
-  scannerAutoProceed=false;
-  await stopScanner();
-  $('scannerModal').classList.add('hidden');
+  scannerAutoProceed=false;iosScanCaptureBusy=false;await stopScanner();$('scannerModal').classList.add('hidden');
 }
 
-// Release live scanner resources if the browser/app is backgrounded or the page is closed.
 window.addEventListener('pagehide',()=>{try{releaseScannerForNativeCapture()}catch{}});
-document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='hidden'&&scannerRunning){
-    // A hidden scanning page should not keep the camera/decoder alive.
-    try{releaseScannerForNativeCapture()}catch{}
-  }
-});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'&&scannerRunning)try{releaseScannerForNativeCapture()}catch{}});
 
 async function prepareScanRecord(codes,evidenceFiles=[]){
-  toast('QR / barcode read. Auto-filling verification fields…',2800);
+  const evidence=[...(evidenceFiles||[])].filter(Boolean);
+  if(!evidence.length){scannerAutoProceed=false;toast('Evidence photo is required for every scanned tag.',4500);return false}
+  toast('QR / barcode read. Preparing verification with photo…',2800);
   try{
-    const photos=await compressFiles(evidenceFiles,'scan-image');
+    const photos=await compressFiles(evidence,'scan-image');
+    if(!photos.length)throw new Error('Evidence photo could not be prepared');
     const d=new Date(),joined=codes.join(' | '),first=photos[0],captureToken=uid();
-    const parsedCodes=codes.map(parseScanPayload);
-    const mapped=scanDynamicValues(parsedCodes);
-    const assets=parsedCodes.map(scanPayloadToAsset);
-    pendingRecord={captureToken,photos,dataUrl:first?.dataUrl||null,size:photos.reduce((n,p)=>n+p.size,0),source:'scan',capturedAt:d.toISOString(),photoName:first?.name||'',scanCode:joined,gps:{latitude:'',longitude:'',accuracy:'',error:'GPS detection is in progress…'}};
-    $('detailTitle').textContent=codes.length>1?`Scan & Verify · ${codes.length} codes`:'Scan & Verify Details';
-    renderPendingPhotoPreview();
-    $('scanOnlyPreview').classList.remove('hidden');
-    $('scanOnlyCode').textContent=joined;
-    $('retryAiBtn').classList.add('hidden');
+    const parsedCodes=codes.map(parseScanPayload),mapped=scanDynamicValues(parsedCodes),assets=parsedCodes.map(scanPayloadToAsset);
+    pendingRecord={captureToken,photos,dataUrl:first.dataUrl,size:photos.reduce((n,p)=>n+p.size,0),source:'scan',capturedAt:d.toISOString(),photoName:first.name||'',scanCode:joined,gps:{latitude:'',longitude:'',accuracy:'',error:'GPS detection is in progress…'}};
+    $('detailTitle').textContent=codes.length>1?`Scan & Verify · ${codes.length} codes`:'Scan & Verify Details';renderPendingPhotoPreview();$('scanOnlyPreview').classList.remove('hidden');$('scanOnlyCode').textContent=joined;$('retryAiBtn').classList.add('hidden');
     const filledCount=Object.keys(mapped.sticky).length+Object.keys(mapped.variable).length+assets.reduce((n,a)=>n+[a.assetName,a.serialNumber,a.barcode].filter(Boolean).length,0);
-    $('aiStatus').textContent=filledCount
-      ?`Scanner auto-filled ${filledCount} recognised value${filledCount===1?'':'s'}. Review before saving.`
-      :'QR / barcode text captured and placed in Barcode / QR / Asset Tag automatically.';
-    setCaptureDateTime(d);
-    $('latitude').value='';$('longitude').value='';$('gpsAccuracy').value='';
-    $('gpsNote').textContent='GPS detection starts after scanning. Latitude, Longitude and GPS Accuracy remain optional.';
-    renderCaptureStickyFields(mapped.sticky);
-    renderVariableFields('variableFieldsContainer',mapped.variable,'variable');
-    renderAssetRows(assets.length?assets:[assetDefault()]);
-    openPendingDetailStep1();
-    updateGuidedCaptureFlow(false);
-    // GPS starts only after camera is released, avoiding competing permission
-    // prompts on iPhone Safari.
+    $('aiStatus').textContent=filledCount?`Scanner auto-filled ${filledCount} recognised value${filledCount===1?'':'s'}. Evidence photo attached. Review before saving.`:'QR / barcode text captured. Evidence photo attached. Review before saving.';
+    setCaptureDateTime(d);$('latitude').value='';$('longitude').value='';$('gpsAccuracy').value='';$('gpsNote').textContent='GPS detection starts after scanning. Latitude, Longitude and GPS Accuracy remain optional.';
+    renderCaptureStickyFields(mapped.sticky);renderVariableFields('variableFieldsContainer',mapped.variable,'variable');renderAssetRows(assets.length?assets:[assetDefault()]);openPendingDetailStep1();updateGuidedCaptureFlow(false);
     pendingRecord.gpsPromise=captureGpsForPendingRecord(captureToken);
-  }catch(e){
-    console.error(e);
-    scannerAutoProceed=false;
-    toast('Could not prepare scan verification. Please try again.',4200);
-  }
+    return true;
+  }catch(e){console.error(e);scannerAutoProceed=false;toast('Could not prepare the scan photo. Please retake the scan.',4500);return false}
 }
 
 // ---------- Records ----------
@@ -1386,4 +1449,4 @@ function setupVisualViewport(){const update=()=>{const vv=window.visualViewport;
 document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;const visibleModal=[...document.querySelectorAll('.modal:not(.hidden)')].pop();if(visibleModal){if(visibleModal.id==='scannerModal'){closeScanner();return}if(visibleModal.id==='detailModal'){pendingRecord=null;aiSeq++;visibleModal.classList.add('hidden');return}if(visibleModal.id==='memberSelectModal'){ $('closeMemberSelectBtn').click(); return }visibleModal.classList.add('hidden');return}if(!$('drawer').classList.contains('hidden')){closeDrawer();return}if(!$('viewExitBtn').classList.contains('hidden'))$('viewExitBtn').click()});
 
 async function health(){try{await fetch(WORKER_URL)}catch{}}
-window.addEventListener('online',async()=>{updateOfflineNotice();await updateSyncUi();await syncQueue();await refreshRecords()});window.addEventListener('offline',()=>{updateOfflineNotice();updateSyncUi()});setupVisualViewport();health();restoreSession();if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.error));
+window.addEventListener('online',async()=>{updateOfflineNotice();await updateSyncUi();await syncQueue();await refreshRecords()});window.addEventListener('offline',()=>{updateOfflineNotice();updateSyncUi()});setupVisualViewport();health();restoreSession();if('serviceWorker' in navigator)window.addEventListener('load',async()=>{try{const reg=await navigator.serviceWorker.register('./sw.js?v=210');try{await reg.update()}catch{};let reloading=false;navigator.serviceWorker.addEventListener('controllerchange',()=>{if(reloading)return;reloading=true;location.reload()})}catch(error){console.error('Service worker registration failed',error)}});

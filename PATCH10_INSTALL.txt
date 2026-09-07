@@ -1,0 +1,68 @@
+PRS.AssetVerify V2 — PATCH 10 iPHONE NATIVE SCANNER
+==================================================
+
+PURPOSE
+-------
+Patch 10 replaces the unreliable iPhone live getUserMedia scanner path with
+a native iOS camera-capture workflow.
+
+On iPhone/iPad:
+1. Open Scan & Verify.
+2. The scanner shows "Open Camera & Scan".
+3. That control is a real HTML label bound directly to an <input type=file
+   accept=image/* capture=environment> — not a synthetic delayed click.
+4. iOS opens its native rear camera UI.
+5. The captured photo is retained as verification evidence.
+6. The app attempts QR/barcode recognition on the captured still image using
+   several image passes. If decoding is unavailable, the photo remains attached
+   and the code can still be entered manually.
+7. A scanned verification cannot proceed or save without a photo.
+
+Android/Desktop:
+- Existing live camera scanning remains available, with simpler camera constraints
+  and evidence-photo safeguards.
+
+FILES TO REPLACE IN GITHUB MAIN
+-------------------------------
+Replace these THREE files in the ROOT of PRSAV/PRS2:
+  1. app.js
+  2. index.html
+  3. sw.js
+
+Do NOT add Patch 9 on top of Patch 10.
+Do NOT keep a patch9-ios-camera-hotfix.js script tag.
+Patch 10 is a complete integrated replacement of the scanner code.
+
+IMPORTANT DEPLOYMENT CHECK
+--------------------------
+After deployment, on iPhone open Scan & Verify.
+You MUST see this wording:
+  "iPhone scanner ready (V2 Patch 10)."
+And the camera control MUST say:
+  "Open Camera & Scan"
+
+If you still see "Start Camera" on iPhone, the new files are not the ones being
+served yet (old GitHub Pages/service-worker cache or wrong branch).
+
+CACHE FIX INCLUDED
+------------------
+- index.html loads app.js?v=210
+- app.js registers sw.js?v=210 and forces a service-worker update
+- sw.js uses cache name: prs-assetverify-2-0-10-ios-native-scan
+- same-origin application files are network-first so iPhone should not stay
+  trapped on an older cached scanner.
+
+FIRST iPHONE TEST
+-----------------
+1. Wait for GitHub Pages deployment to finish.
+2. Close every open PRS.AssetVerify Safari tab.
+3. Reopen Safari and load the site fresh.
+4. Login -> Scan & Verify.
+5. Confirm "V2 Patch 10" text is visible.
+6. Tap Open Camera & Scan.
+7. Photograph a QR/barcode so the complete code is visible and in focus.
+8. If detected, verification opens automatically with the evidence photo.
+9. If not detected, use Retake Camera or enter the code manually; the captured
+   photo remains attached.
+
+NO CLOUDFLARE WORKER CHANGE IS REQUIRED FOR THIS CAMERA PATCH.
