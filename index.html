@@ -350,7 +350,7 @@
     <div class="form-stack"><label>Scanned Code<input id="manualScanCode" placeholder="Scan or enter manually" /></label><div id="scanDetectedList" class="scan-code-list"></div></div>
     <div class="grid two"><button id="startScannerBtn" class="primary">Start Camera</button><label id="iosScanCameraLabel" for="prsIOSScanCameraInput" class="primary" hidden role="button" style="align-items:center;justify-content:center;text-align:center;cursor:pointer;min-height:44px;padding:10px 14px;border-radius:10px;">Open Camera &amp; Scan</label><button id="scanImageBtn" class="secondary">Scan Image</button></div>
     <button id="useScanCodeBtn" class="success full">Use Code(s) & Verify</button>
-    <p id="scanStatus" class="field-note"></p><p class="field-note"><strong>Patch 12 · Barcode-first:</strong> optimised specifically for 1D barcodes: Code 128 / GS1-128, Code 39, Code 93, UPC-A/E, EAN-13/8, ITF / ITF-14, Codabar, GS1 DataBar and MSI. For best results keep the entire barcode and the blank quiet margins on BOTH sides visible. QR capability remains as a compatibility fallback.</p>
+    <p id="scanStatus" class="field-note"></p><p class="field-note"><strong>Patch 13 · Extended Linear:</strong> Code 128, Code 11, Interleaved / Industrial 2 of 5, Code 39 + Full ASCII, Code 93, GS1-128, MSI, Pharmacode One-Track, Pharmacode Two-Track, Telepen Alpha and 9-position Flattermarken. Keep the complete mark field visible; ordinary barcodes also need blank quiet margins on both sides.</p>
   </div></div>
 
   <div id="userModal" class="modal hidden"><div class="modal-sheet small-sheet">
@@ -390,6 +390,6 @@
   </div></div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=212"></script>
+  <script src="app.js?v=213"></script>
 </body>
 </html>

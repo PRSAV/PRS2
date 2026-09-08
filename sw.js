@@ -1,8 +1,8 @@
-const CACHE = 'prs-assetverify-2-0-12-barcode-first';
+const CACHE = 'prs-assetverify-2-0-13-extended-linear';
 const CORE = [
   './',
   './index.html',
-  './app.js?v=212',
+  './app.js?v=213',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'
@@ -39,7 +39,7 @@ self.addEventListener('fetch', event => {
 
   const url = new URL(request.url);
   const sameOrigin = url.origin === self.location.origin;
-  const trustedRuntimeAsset = url.hostname === 'unpkg.com' || url.hostname === 'cdn.jsdelivr.net';
+  const trustedRuntimeAsset = url.hostname === 'unpkg.com' || url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'esm.sh';
   if (!sameOrigin && !trustedRuntimeAsset) return;
 
   // Navigation and all same-origin application files are network-first. This is
@@ -56,7 +56,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Barcode decoder CDN dependencies (ZXing / Quagga2 / fallbacks) use cache-first after the first successful load.
+  // Barcode decoder CDN dependencies (ZXing / Quagga2 / extended-linear / fallbacks) use cache-first after the first successful load.
   event.respondWith((async () => {
     const cached = await caches.match(request);
     if (cached) {

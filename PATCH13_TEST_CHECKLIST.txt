@@ -1,0 +1,21 @@
+Patch 13 Linear-Code Test Checklist
+===================================
+For ordinary 1D codes: keep every bar and blank quiet zone on both sides visible.
+For Two-Track Pharmacode: keep full top AND bottom track height visible.
+For Flattermarken: keep the complete 9-position mark field and surrounding white space.
+
+[ ] Code 128
+[ ] Code 11
+[ ] Interleaved 2 of 5
+[ ] Industrial / Standard 2 of 5
+[ ] Code 39
+[ ] Code 39 Full ASCII
+[ ] Code 93
+[ ] GS1-128
+[ ] MSI
+[ ] Pharmacode One-Track
+[ ] Pharmacode Two-Track
+[ ] Telepen Alpha
+[ ] Flattermarken
+
+On failure, copy the full on-screen engine diagnostic line and keep the failed photo.

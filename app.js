@@ -638,12 +638,16 @@ let scannerEngineSource='';
 let zxingEngineLoadPromise=null;
 let quaggaEngineLoadPromise=null;
 let jsBarcodeEngineLoadPromise=null;
-const barcodeEngineState={zxing:'idle',quagga:'idle',js:'idle',legacy:'idle'};
-function barcodeEngineSummary(){return `Engines — ZXing: ${barcodeEngineState.zxing}; Quagga2: ${barcodeEngineState.quagga}; JS fallback: ${barcodeEngineState.js}`;}
+let sythosEngineLoadPromise=null;
+const barcodeEngineState={zxing:'idle',quagga:'idle',sythos:'idle',js:'idle',legacy:'idle',special:'ready'};
+function barcodeEngineSummary(){return `Engines — ZXing: ${barcodeEngineState.zxing}; Quagga2: ${barcodeEngineState.quagga}; Extended 1D: ${barcodeEngineState.sythos}; JS fallback: ${barcodeEngineState.js}; Special marks: ${barcodeEngineState.special}`;}
 
-// V2 PATCH 12 — BARCODE-FIRST DECODER
-// The camera workflow from Patch 10/11 is intentionally unchanged. This patch
-// replaces only the decoding layer and is tuned first for linear / 1D barcodes.
+// V2 PATCH 13 — EXTENDED LINEAR CODE DECODER
+// Patch 10's reliable iPhone native-camera flow remains unchanged. Patch 13
+// extends Patch 12's barcode-first decoder without weakening Code 128. It adds
+// dedicated passes for Code 11, MSI, Telepen Alpha, Code 39 Full ASCII and the
+// 2-of-5 family, plus conservative image decoders for Pharmacode Two-Track and
+// fixed 9-position Flattermarken.
 //
 // Primary engine: ZXing-C++ WASM (all linear formats, original photo first).
 // Secondary engine: Quagga2 (specialised 1D locator/decoder on prepared images).
@@ -668,7 +672,24 @@ const JS_BARCODE_READER_URLS=[
   'https://unpkg.com/javascript-barcode-reader@1.0.0/dist/javascript-barcode-reader.umd.min.js',
   'https://unpkg.com/javascript-barcode-reader@1.0.0'
 ];
+const SYTHOS_VERSION='1.6.3';
+const SYTHOS_ESM_URLS=[
+  `https://cdn.jsdelivr.net/npm/@sythos/js_barcode_universal@${SYTHOS_VERSION}/+esm`,
+  `https://esm.sh/@sythos/js_barcode_universal@${SYTHOS_VERSION}`
+];
+const SYTHOS_LINEAR_FORMAT_GROUPS=[
+  ['code11'],
+  ['msi'],
+  ['telepen'],
+  ['code39'],
+  ['code93'],
+  ['code128','gs1-128'],
+  ['itf','itf14'],
+  ['code-25','code2of5','standard-2-of-5','industrial-2-of-5','iata-2-of-5'],
+  ['codabar']
+];
 const ZXING_LINEAR_FORMATS=['AllLinear'];
+const ZXING_EXTENDED_LINEAR_FORMATS=['Code39Ext','Code39Std','Telepen','Code128','Code93','ITF','Codabar','EAN13','EAN8','UPCA','UPCE','DataBar'];
 const QUAGGA_ALL_READERS=[
   'code_128_reader','code_39_reader','code_93_reader','codabar_reader',
   'ean_reader','ean_8_reader','upc_reader','upc_e_reader',
@@ -777,6 +798,46 @@ async function ensureJSBarcodeEngine(){
   finally{if(typeof window.javascriptBarcodeReader!=='function')jsBarcodeEngineLoadPromise=null}
 }
 
+async function ensureSythosEngine(){
+  if(window.__prsSythosBarcode?.decode){barcodeEngineState.sythos='ready';return window.__prsSythosBarcode;}
+  if(sythosEngineLoadPromise)return sythosEngineLoadPromise;
+  sythosEngineLoadPromise=(async()=>{
+    let lastError=null;
+    for(const url of SYTHOS_ESM_URLS){
+      try{
+        const mod=await import(url);
+        if(typeof mod?.decode==='function'){window.__prsSythosBarcode=mod;barcodeEngineState.sythos='ready';return mod;}
+        throw new Error('Extended 1D module did not expose decode()');
+      }catch(error){lastError=error;barcodeEngineState.sythos='failed';console.warn('Extended linear barcode engine load failed:',url,error)}
+    }
+    throw lastError||new Error('Extended linear barcode engine unavailable');
+  })();
+  try{return await sythosEngineLoadPromise}
+  finally{if(!window.__prsSythosBarcode?.decode)sythosEngineLoadPromise=null}
+}
+
+async function detectSythosLinear(source){
+  let engine;
+  try{engine=await ensureSythosEngine()}catch{return []}
+  const image=sourceImageData(source,2800);
+  if(!image)return [];
+  const out=[];
+  for(const formats of SYTHOS_LINEAR_FORMAT_GROUPS){
+    try{
+      const hits=engine.decode(image,{formats,tryHarder:true})||[];
+      for(const hit of hits){
+        const value=String(hit?.text??hit?.rawValue??'').trim();
+        const format=String(hit?.format||formats[0]||'');
+        if(value&&barcodeCandidateValid(value,format)&&!out.some(x=>x.rawValue===value)){
+          out.push({rawValue:value,text:value,format,symbology:format,confidence:Number(hit?.confidence||0)});
+        }
+      }
+      if(out.length)return out;
+    }catch(error){console.debug('Extended 1D decode pass failed:',formats.join(','),error)}
+  }
+  return out;
+}
+
 function sourceImageData(source,maxSide=2600){
   if(typeof ImageData!=='undefined'&&source instanceof ImageData)return source;
   if(source?.data instanceof Uint8ClampedArray&&source?.width&&source?.height)return source;
@@ -828,7 +889,12 @@ function barcodeCandidateValid(value,format=''){
   if(f.includes('upca')||f==='upc')return /^\d{12}$/.test(text)&&eanUpcChecksumValid(text);
   if(f.includes('upce'))return /^\d{6,8}$/.test(text);
   if(f.includes('itf')||f.includes('2of5'))return /^\d{4,}$/.test(text);
+  if(f.includes('code11'))return /^[0-9-]{1,140}$/.test(text);
   if(f.includes('msi'))return /^\d{3,}$/.test(text);
+  if(f.includes('pharmacode2')){const n=Number(text);return /^\d+$/.test(text)&&n>=4&&n<=64570080;}
+  if(f.includes('pharmacode')){const n=Number(text);return /^\d+$/.test(text)&&n>=3&&n<=131070;}
+  if(f.includes('flattermarken'))return /^\d{9}$/.test(text);
+  if(f.includes('telepen'))return text.length>0&&text.length<=500;
   return true;
 }
 
@@ -840,10 +906,15 @@ async function createZXingBarcodeDetector(){
       const input=await zxingInputFromSource(source);
       if(!input)return [];
       const profiles=[
-        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:true,tryDenoise:true,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false},
-        // Second pass keeps every narrow module at source resolution. This helps
-        // small Code128 / EAN labels where automatic downscaling can merge bars.
-        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false}
+        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:true,tryDenoise:true,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false,textMode:'HRI'},
+        // Keep every narrow module at source resolution. This protects Code 128,
+        // Code 11-like narrow patterns and small industrial labels from merging.
+        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false,textMode:'HRI'},
+        // Explicit extended pass. Newer ZXing-C++ distinguishes Code39Ext from
+        // Code39Std; Telepen is also explicitly selected here. If a particular
+        // runtime rejects one of these names this pass fails harmlessly and the
+        // AllLinear passes above remain active.
+        {formats:ZXING_EXTENDED_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:false,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false,textMode:'HRI',tryCode39ExtendedMode:true}
       ];
       let firstError=null;
       for(const options of profiles){
@@ -964,6 +1035,10 @@ async function createScannerDetector(){
       let results=[];
       if(primary){try{results=await primary.detect(source)}catch(error){console.debug('ZXing barcode pass failed:',error)}}
       if(results?.length)return results;
+      // Extended 1D pass adds Code 11, MSI and Telepen Alpha without changing the
+      // successful Code 128 path. It runs only after ZXing returns no result.
+      try{results=await detectSythosLinear(source)}catch(error){console.debug('Extended 1D fallback pass failed:',error)}
+      if(results?.length)return results;
       let fallbackSource=source,bitmap=null;
       if(typeof Blob!=='undefined'&&source instanceof Blob&&typeof createImageBitmap==='function'){
         try{bitmap=await createImageBitmap(source,{imageOrientation:'from-image'});fallbackSource=bitmap}catch{}
@@ -1079,6 +1154,114 @@ async function canvasDataUrl(canvas){
   try{return canvas.toDataURL('image/png')}catch{return canvas.toDataURL('image/jpeg',.96)}
 }
 
+// ---- Patch 13 specialised linear marks ------------------------------------
+// These two formats do not have dependable open browser-camera support in the
+// engines above, so they use conservative geometry decoders. They return a value
+// only when the image strongly matches the requested mark grammar; otherwise they
+// deliberately return no result rather than inventing an asset number.
+function otsuBinaryFromSource(source,maxSide=2200){
+  const image=sourceImageData(source,maxSide);if(!image)return null;
+  const {width:w,height:h,data}=image,hist=new Uint32Array(256),gray=new Uint8Array(w*h);
+  let sum=0;
+  for(let p=0,i=0;i<data.length;i+=4,p++){
+    const y=Math.max(0,Math.min(255,Math.round(.299*data[i]+.587*data[i+1]+.114*data[i+2])));gray[p]=y;hist[y]++;sum+=y;
+  }
+  const total=w*h;let sumB=0,wB=0,maxVar=-1,t=128;
+  for(let x=0;x<256;x++){wB+=hist[x];if(!wB)continue;const wF=total-wB;if(!wF)break;sumB+=x*hist[x];const mb=sumB/wB,mf=(sum-sumB)/wF,d=mb-mf,v=wB*wF*d*d;if(v>maxVar){maxVar=v;t=x}}
+  const bin=new Uint8Array(w*h);for(let i=0;i<gray.length;i++)bin[i]=gray[i]<t?1:0;
+  return {width:w,height:h,bin,threshold:t};
+}
+function rowInkProfile(b){const a=new Float32Array(b.height);for(let y=0;y<b.height;y++){let n=0,o=y*b.width;for(let x=0;x<b.width;x++)n+=b.bin[o+x];a[y]=n/b.width}return a}
+function strongestBarcodeBand(b){
+  const p=rowInkProfile(b),sm=new Float32Array(p.length);for(let y=0;y<p.length;y++){let s=0,n=0;for(let k=-2;k<=2;k++){const yy=y+k;if(yy>=0&&yy<p.length){s+=p[yy];n++}}sm[y]=s/n}
+  const peak=Math.max(...sm);if(peak<.015)return null;const cut=Math.max(.012,peak*.28);let best=null,start=-1;
+  for(let y=0;y<=sm.length;y++){const on=y<sm.length&&sm[y]>=cut;if(on&&start<0)start=y;if((!on||y===sm.length)&&start>=0){const end=y-1,len=end-start+1;if(!best||len>best.len)best={start,end,len};start=-1}}
+  if(!best||best.len<Math.max(12,b.height*.05))return null;const pad=Math.round(best.len*.12);return {y0:Math.max(0,best.start-pad),y1:Math.min(b.height-1,best.end+pad)};
+}
+function verticalRunsForBand(b,band,minOccupancy=.34){
+  const h=band.y1-band.y0+1,profile=new Float32Array(b.width);
+  for(let x=0;x<b.width;x++){let n=0;for(let y=band.y0;y<=band.y1;y++)n+=b.bin[y*b.width+x];profile[x]=n/h}
+  const runs=[];let s=-1;for(let x=0;x<=b.width;x++){const on=x<b.width&&profile[x]>=minOccupancy;if(on&&s<0)s=x;if((!on||x===b.width)&&s>=0){const e=x-1;if(e-s+1>=1)runs.push({x0:s,x1:e,w:e-s+1,c:(s+e)/2});s=-1}}
+  // Merge tiny anti-alias gaps inside one printed bar.
+  const merged=[];for(const r of runs){const last=merged[merged.length-1];if(last&&r.x0-last.x1<=2){last.x1=r.x1;last.w=last.x1-last.x0+1;last.c=(last.x0+last.x1)/2}else merged.push({...r})}return merged;
+}
+function median(nums){if(!nums.length)return 0;const a=[...nums].sort((x,y)=>x-y);const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2}
+function cv(nums){if(nums.length<2)return 0;const m=nums.reduce((a,b)=>a+b,0)/nums.length;if(!m)return 99;const v=nums.reduce((a,b)=>a+(b-m)*(b-m),0)/nums.length;return Math.sqrt(v)/m}
+
+function detectPharmacodeTwoTrack(source){
+  const b=otsuBinaryFromSource(source,2200);if(!b)return [];
+  const band=strongestBarcodeBand(b);if(!band)return [];
+  const runs=verticalRunsForBand(b,band,.26).filter(r=>r.w>=2);
+  if(runs.length<2||runs.length>16)return [];
+  if(cv(runs.map(r=>r.w))>.48)return [];
+  const bandH=band.y1-band.y0+1,mid=(band.y0+band.y1)/2;
+  const digits=[];let classScore=0;
+  for(const r of runs){
+    const xa=Math.max(r.x0,Math.round(r.c-r.w*.25)),xb=Math.min(r.x1,Math.round(r.c+r.w*.25));
+    let top=0,topN=0,bot=0,botN=0;
+    const topEnd=Math.floor(mid-bandH*.08),botStart=Math.ceil(mid+bandH*.08);
+    for(let y=band.y0;y<=topEnd;y++)for(let x=xa;x<=xb;x++){top+=b.bin[y*b.width+x];topN++}
+    for(let y=botStart;y<=band.y1;y++)for(let x=xa;x<=xb;x++){bot+=b.bin[y*b.width+x];botN++}
+    const tr=topN?top/topN:0,br=botN?bot/botN:0;let d=0,score=0;
+    if(tr>.48&&br>.48){d=3;score=Math.min(tr,br)}
+    else if(tr>.52&&br<.28){d=2;score=(tr+(1-br))/2}
+    else if(br>.52&&tr<.28){d=1;score=(br+(1-tr))/2}
+    else return [];
+    digits.push(d);classScore+=score;
+  }
+  classScore/=digits.length;
+  const gaps=runs.slice(1).map((r,i)=>r.x0-runs[i].x1-1).filter(x=>x>0);if(gaps.length&&cv(gaps)>.72)return [];
+  const value=digits.reduce((n,d)=>n*3+d,0);
+  if(value<4||value>64570080||classScore<.70)return [];
+  return [{rawValue:String(value),text:String(value),format:'PharmacodeTwoTrack',symbology:'Pharmacode Two-Track',confidence:classScore}];
+}
+
+function detectFlattermarken9(source){
+  const b=otsuBinaryFromSource(source,2200);if(!b)return [];
+  const band=strongestBarcodeBand(b);if(!band)return [];
+  let runs=verticalRunsForBand(b,band,.42).filter(r=>r.w>=2);
+  if(runs.length<1||runs.length>9)return [];
+  const widths=runs.map(r=>r.w),m0=median(widths);if(m0<1||cv(widths)>.32)return [];
+  // Flattermarken uses equal-width marks positioned in one of nine module slots
+  // per digit. We fit observed mark centres to a 9 x 9 module lattice and only
+  // accept a fit that explains every mark with one mark maximum per digit cell.
+  let best=null;
+  for(const mul of [.82,.88,.94,1,1.06,1.12,1.18]){
+    const m=m0*mul;if(m<1)continue;
+    for(const seed of runs){
+      for(let j=0;j<81;j++){
+        const off=seed.c-j*m;const digits=new Array(9).fill(0),used=new Set();let err=0,ok=true;
+        for(const r of runs){
+          const q=(r.c-off)/m,ji=Math.round(q),res=Math.abs(q-ji);
+          if(ji<0||ji>80||res>.34){ok=false;break}
+          const cell=Math.floor(ji/9),pos=ji%9+1;if(used.has(cell)){ok=false;break}used.add(cell);digits[cell]=pos;err+=res;
+        }
+        if(!ok)continue;
+        const left=off-.5*m,right=off+80.5*m;
+        if(left<-b.width*.08||right>b.width*1.08)continue;
+        const span=right-left;if(span<b.width*.18||span>b.width*1.05)continue;
+        const score=1-err/Math.max(1,runs.length);
+        // Prefer a lattice whose field centre is near the photographed mark field.
+        const barCenter=(runs[0].c+runs[runs.length-1].c)/2,fieldCenter=(left+right)/2;
+        const centerPenalty=Math.min(.25,Math.abs(fieldCenter-barCenter)/Math.max(span,1));
+        const final=score-centerPenalty;
+        if(!best||final>best.score)best={digits,score:final,m,left,right};
+      }
+    }
+  }
+  if(!best||best.score<.68)return [];
+  const text=best.digits.join('');
+  return [{rawValue:text,text,format:'Flattermarken',symbology:'Flattermarken',confidence:best.score}];
+}
+
+function detectSpecialLinearMarks(source){
+  const out=[];
+  for(const hit of detectPharmacodeTwoTrack(source))out.push(hit);
+  // Avoid interpreting a proven two-track Pharmacode as Flattermarken.
+  if(!out.length)for(const hit of detectFlattermarken9(source))out.push(hit);
+  return out;
+}
+
 async function detectCodesFromImageFile(file){
   const found=[];
   const push=(value,format='')=>{
@@ -1087,9 +1270,10 @@ async function detectCodesFromImageFile(file){
   };
 
   // Warm independent engines in parallel. Failure of one engine never blocks the others.
-  const [zxingResult,quaggaResult]=await Promise.allSettled([createZXingBarcodeDetector(),ensureQuaggaEngine()]);
+  const [zxingResult,quaggaResult,sythosResult]=await Promise.allSettled([createZXingBarcodeDetector(),ensureQuaggaEngine(),ensureSythosEngine()]);
   const zxing=zxingResult.status==='fulfilled'?zxingResult.value:null;
   const quaggaReady=quaggaResult.status==='fulfilled';
+  const sythosReady=sythosResult.status==='fulfilled';
 
   // 1) Always try the ORIGINAL iPhone/Android photo first. ZXing receives the
   // encoded file at full resolution, preserving every narrow bar and quiet zone.
@@ -1099,6 +1283,13 @@ async function detectCodesFromImageFile(file){
       for(const r of results||[])push(scanRawValue(r),r?.format||'');
       if(found.length)return found;
     }catch(error){console.debug('Original barcode photo ZXing pass failed:',error)}
+  }
+  if(sythosReady){
+    try{
+      const results=await detectSythosLinear(file);
+      for(const r of results||[])push(scanRawValue(r),r?.format||'');
+      if(found.length)return found;
+    }catch(error){console.debug('Original photo extended-linear pass failed:',error)}
   }
 
   let item=null,legacy=null;
@@ -1140,7 +1331,27 @@ async function detectCodesFromImageFile(file){
         }
         if(found.length)return found;
 
-        // 4) Browser BarcodeDetector/ZBar fallback on the strongest centre passes.
+        // 4) Extended linear engine — targeted Code 11 / MSI / Telepen / Code39
+        // Full ASCII and 2-of-5 variants. Run on the strongest prepared passes.
+        if(sythosReady&&(i<=2||desc.threshold||desc.rotate)){
+          try{
+            const results=await detectSythosLinear(canvas);
+            for(const r of results||[])push(scanRawValue(r),r?.format||'');
+          }catch(error){console.debug('Prepared extended-linear pass failed:',error)}
+        }
+        if(found.length)return found;
+
+        // 5) Conservative geometry decoders for Pharmacode Two-Track and
+        // Flattermarken. These run late so they never steal a valid standard code.
+        if(i===0||i===1||desc.threshold){
+          try{
+            const results=detectSpecialLinearMarks(canvas);
+            for(const r of results||[])push(scanRawValue(r),r?.format||'');
+          }catch(error){console.debug('Special linear-mark pass failed:',error)}
+        }
+        if(found.length)return found;
+
+        // 6) Browser BarcodeDetector/ZBar fallback on the strongest centre passes.
         if(i<=2||desc.threshold){
           if(!legacy){try{legacy=await createLegacyDetector()}catch{legacy=null}}
           if(legacy){
@@ -1152,7 +1363,7 @@ async function detectCodesFromImageFile(file){
         }
         if(found.length)return found;
 
-        // 5) Pure-JS decoder fallback (also adds MSI) on the centre/threshold pass.
+        // 7) Pure-JS decoder fallback (MSI + one-track Pharmacode) on the centre/threshold pass.
         if(i===2||desc.threshold){
           const results=await detectJSBarcodeReader(canvas);
           for(const r of results||[])push(scanRawValue(r),r?.format||'');
@@ -1214,7 +1425,7 @@ function ensureIOSScanCameraInput(){
 
     scanEvidenceFiles=[file];
     showCapturedScanPhoto(file);
-    $('scanStatus').textContent='Photo captured. Reading barcode with the barcode-first decoder…';
+    $('scanStatus').textContent='Photo captured. Reading linear code with Patch 13 extended decoders…';
     let codes=[];
     try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('iPhone captured-image scan failed:',error)}
     if(codes.length){
@@ -1231,7 +1442,7 @@ function ensureIOSScanCameraInput(){
     }
     scannerAutoProceed=false;
     renderScanCodes();
-    $('scanStatus').textContent=`Photo captured, but the barcode was not read automatically. Retake closer/sharper so the bars fill most of the photo width while keeping blank margins on both sides. ${barcodeEngineSummary()} The photo is already attached.`;
+    $('scanStatus').textContent=`Photo captured, but the linear code was not read automatically. Retake closer/sharper with the full mark field visible. For ordinary barcodes keep blank margins on both sides; for Two-Track Pharmacode keep the full bar height visible. ${barcodeEngineSummary()} The photo is already attached.`;
   });
   document.body.appendChild(input);
   iosScanCameraInput=input;
@@ -1325,9 +1536,9 @@ function openScanner(){
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
     if(iosLabel){iosLabel.hidden=false;iosLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='Barcode-first scanner ready (V2 Patch 12). Tap Open Camera & Scan. For 1D barcodes, keep every bar plus the blank quiet margins on BOTH sides visible and let the barcode fill most of the photo width. The same photo is saved as evidence. Primary support: Code 128 / GS1-128, Code 39, Code 93, EAN-13/8, UPC-A/E, ITF/ITF-14, Codabar, GS1 DataBar and MSI.';
-    // Warm the decoder in the background. This never blocks the native camera.
-    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureQuaggaEngine()]).then(()=>console.debug(barcodeEngineSummary())),0);
+    $('scanStatus').textContent='Extended linear scanner ready (V2 Patch 13). Tap Open Camera & Scan. Supports Code 128, Code 11, Interleaved/Industrial 2 of 5, Code 39 + Full ASCII, Code 93, GS1-128, MSI, Pharmacode One-Track, Pharmacode Two-Track, Telepen Alpha and 9-position Flattermarken. Keep the complete bars and quiet margins visible.';
+    // Warm the standard and extended decoders in the background. This never blocks the native camera.
+    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureQuaggaEngine(),ensureSythosEngine()]).then(()=>console.debug(barcodeEngineSummary())),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
     if(iosLabel)iosLabel.hidden=true;

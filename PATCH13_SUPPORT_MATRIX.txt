@@ -1,0 +1,31 @@
+PRS.AssetVerify V2 Patch 13 — Requested Linear-Code Matrix
+==========================================================
+
+STANDARD / COMMON LINEAR
+[YES] Code 128 — ZXing-C++ primary + Quagga2 + JS fallback
+[YES] Code 11 — dedicated extended 1D decoder
+[YES] Code 2 of 5 Interleaved / ITF — ZXing + Quagga2 + extended 1D
+[YES] Code 39 — ZXing + Quagga2 + extended 1D
+[YES] Code 39 Full ASCII / Extended — explicit ZXing Code39Ext pass
+[YES] Code 93 — ZXing + Quagga2 + extended 1D
+[YES] GS1-128 / UCC-EAN-128 — Code 128/FNC1 through ZXing + extended 1D
+[YES] MSI / Modified Plessey — dedicated extended 1D + JS fallback
+[YES] Telepen Alpha — ZXing Telepen + dedicated extended 1D
+
+SPECIAL INDUSTRIAL / PHARMA
+[YES] Pharmacode One-Track — Quagga2 + JS fallback
+[YES*] Pharmacode Two-Track — local conservative geometry decoder; full symbol
+       height must be visible. No checksum exists, so the decoder intentionally
+       rejects ambiguous photos rather than returning a guessed value.
+[YES*] Flattermarken — local conservative decoder for the 9-position/digit form
+       shown in the supplied reference list. Flattermarken is position-coded and
+       has no framing/checksum; the full mark field must be visible.
+
+OTHER 2-OF-5
+[YES] Standard / Industrial 2 of 5 — Quagga2 + extended 1D fallback
+[YES] IATA 2 of 5 — extended 1D targeted pass
+
+NOTE
+The scanner tries proven framed/checksummed formats first. Pharmacode Two-Track
+and Flattermarken are intentionally late fallback passes because neither has a
+normal checksum/frame that is safe for unrestricted auto-detection.

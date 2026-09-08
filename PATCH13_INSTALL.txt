@@ -1,0 +1,24 @@
+PRS.AssetVerify V2 Patch 13 — Extended Linear Code Support
+========================================================
+
+BASELINE
+Patch 13 is built directly on the working Patch 12 codebase. It does NOT change
+the Patch 10 iPhone native camera workflow, Cloudflare Worker, D1, R2, records,
+company configuration, or Excel logic.
+
+DEPLOY
+Replace only these 3 root files in PRSAV/PRS2:
+  app.js
+  index.html
+  sw.js
+Commit/merge to main, wait for GitHub Pages, close all PRS Safari tabs, and reopen.
+
+DEPLOYMENT CHECK
+Scan & Verify must display:
+  Extended linear scanner ready (V2 Patch 13).
+If it still says Patch 12, do not test; the browser is still running old code.
+
+FIRST TEST SET
+Use one clean specimen of each required symbology. Start with the common group:
+Code 128, Code 11, I2of5, Code 39, Code 39 Full ASCII, Code 93, GS1-128, MSI,
+Telepen Alpha. Then test Pharmacode One-Track, Two-Track and Flattermarken.
