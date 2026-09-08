@@ -1,0 +1,12 @@
+PATCH 15 TEST
+
+1. Deploy app.js, index.html and sw.js.
+2. Confirm Scan & Verify says V2 Patch 15.
+3. Leave Barcode Type on Auto, photograph the TEC-IT Code-11 sample 0123-4567.
+   Expected result: 0123-4567
+4. Repeat with Barcode Type = Code 11.
+   Expected result: 0123-4567
+5. Confirm the evidence photo remains attached to the verification.
+6. Re-test one known-working Code-128 label to verify no regression.
+
+If Code-11 fails, send the actual captured evidence photo from the phone rather than a screenshot of the error; Patch 15 diagnostics can then be tuned against the exact camera image.

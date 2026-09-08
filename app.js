@@ -1394,6 +1394,145 @@ async function detectCodesFromImageFile(file){
 
 
 // ---------------------------------------------------------------------------
+// V2 PATCH 15 — NATIVE CODE 11 DECODER
+// ---------------------------------------------------------------------------
+// Code 11 is deliberately decoded locally instead of depending on a generic
+// browser barcode library. Each symbol has five alternating bar/space elements
+// plus one narrow inter-character space. The shared start/stop pattern is 11221.
+// We require BOTH start and stop and decode the complete payload in between.
+const PRS_CODE11_PATTERNS={
+  '0':[1,1,1,1,2], '1':[2,1,1,1,2], '2':[1,2,1,1,2], '3':[2,2,1,1,1],
+  '4':[1,1,2,1,2], '5':[2,1,2,1,1], '6':[1,2,2,1,1], '7':[1,1,1,2,2],
+  '8':[2,1,1,2,1], '9':[2,1,1,1,1], '-':[1,1,2,1,1], 'S':[1,1,2,2,1]
+};
+function prsCode11Otsu(values){
+  const hist=new Uint32Array(256);let total=0,sum=0;
+  for(const raw of values){const v=Math.max(0,Math.min(255,Math.round(raw)));hist[v]++;total++;sum+=v}
+  if(!total)return 127;
+  let sumB=0,wB=0,best=127,maxVar=-1;
+  for(let t=0;t<256;t++){
+    wB+=hist[t];if(!wB)continue;
+    const wF=total-wB;if(!wF)break;
+    sumB+=t*hist[t];const mB=sumB/wB,mF=(sum-sumB)/wF,d=mB-mF,v=wB*wF*d*d;
+    if(v>maxVar){maxVar=v;best=t}
+  }
+  return best;
+}
+function prsCode11Runs(bits){
+  if(!bits?.length)return [];
+  const runs=[];let black=!!bits[0],width=1;
+  for(let i=1;i<bits.length;i++){
+    const b=!!bits[i];
+    if(b===black)width++;
+    else{runs.push({black,width});black=b;width=1}
+  }
+  runs.push({black,width});
+  let changed=true;
+  while(changed){
+    changed=false;
+    for(let i=1;i<runs.length-1;i++){
+      if(runs[i].width<=1&&runs[i-1].black===runs[i+1].black){
+        runs[i-1].width+=runs[i].width+runs[i+1].width;runs.splice(i,2);changed=true;break;
+      }
+    }
+  }
+  return runs;
+}
+function prsCode11Fit(widths,pattern){
+  let nSum=0,nCount=0,wSum=0,wCount=0;
+  for(let i=0;i<5;i++){
+    if(pattern[i]===1){nSum+=widths[i];nCount++}else{wSum+=widths[i];wCount++}
+  }
+  if(!nCount||!wCount)return {score:999,narrow:0,wide:0};
+  const narrow=nSum/nCount,wide=wSum/wCount,ratio=wide/Math.max(.001,narrow);
+  if(ratio<1.42||ratio>5.2)return {score:999,narrow,wide};
+  let err=0;
+  for(let i=0;i<5;i++){
+    const expected=pattern[i]===1?narrow:wide;
+    const d=(widths[i]-expected)/Math.max(1,expected);err+=d*d;
+  }
+  return {score:Math.sqrt(err/5),narrow,wide};
+}
+function prsCode11Classify(widths){
+  let best={score:999,char:'',narrow:0,wide:0};
+  for(const [char,pattern] of Object.entries(PRS_CODE11_PATTERNS)){
+    const fit=prsCode11Fit(widths,pattern);if(fit.score<best.score)best={...fit,char};
+  }
+  return best;
+}
+function prsCode11DecodeRuns(runs){
+  const out=[];
+  for(let start=0;start+11<runs.length;start++){
+    if(!runs[start].black)continue;
+    const first=runs.slice(start,start+5);
+    if(first.length<5||first.some((r,i)=>r.black!==(i%2===0)))continue;
+    const sf=prsCode11Classify(first.map(r=>r.width));
+    if(sf.char!=='S'||sf.score>.31)continue;
+    let j=start,totalScore=0,symbols=0,data=[],started=false,lastNarrow=sf.narrow;
+    while(j+5<=runs.length){
+      const five=runs.slice(j,j+5);
+      if(five.some((r,i)=>r.black!==(i%2===0)))break;
+      const fit=prsCode11Classify(five.map(r=>r.width));
+      if(fit.score>.34)break;
+      totalScore+=fit.score;symbols++;lastNarrow=fit.narrow;j+=5;
+      if(fit.char==='S'){
+        if(!started)started=true;
+        else{
+          const value=data.join('');
+          if(value&&/^[0-9-]+$/.test(value)&&value.length<=80){
+            const leftQuiet=start>0&&!runs[start-1].black?runs[start-1].width:0;
+            const rightQuiet=j<runs.length&&!runs[j].black?runs[j].width:0;
+            const quietScore=Math.min(leftQuiet,rightQuiet)/Math.max(1,lastNarrow);
+            out.push({value,score:totalScore/Math.max(1,symbols),symbols,start,end:j,quietScore});
+          }
+          break;
+        }
+      }else{
+        if(!started)break;data.push(fit.char);
+      }
+      if(j>=runs.length)break;
+      const sep=runs[j];if(sep.black)break;
+      if(sep.width>Math.max(fit.narrow*2.8,fit.narrow+6))break;
+      j++;
+    }
+  }
+  return out;
+}
+function prsCode11ScanImageData(image,selected=false){
+  if(!image?.data||!image.width||!image.height)return [];
+  const {data,width:w,height:h}=image,votes=new Map(),yCount=81,half=Math.max(1,Math.min(4,Math.round(h/900)));
+  for(let yi=0;yi<yCount;yi++){
+    const y=Math.max(0,Math.min(h-1,Math.round((.07+(.86*yi/(yCount-1)))*(h-1))));
+    const profile=new Float32Array(w);
+    for(let x=0;x<w;x++){
+      let sum=0,n=0;
+      for(let dy=-half;dy<=half;dy++){
+        const yy=y+dy;if(yy<0||yy>=h)continue;
+        const k=(yy*w+x)*4;sum+=.299*data[k]+.587*data[k+1]+.114*data[k+2];n++;
+      }
+      profile[x]=sum/Math.max(1,n);
+    }
+    const otsu=prsCode11Otsu(profile);
+    for(const threshold of [otsu,Math.max(15,otsu-9),Math.min(240,otsu+9)]){
+      const bits=new Uint8Array(w);for(let x=0;x<w;x++)bits[x]=profile[x]<threshold?1:0;
+      for(const c of prsCode11DecodeRuns(prsCode11Runs(bits))){
+        if(!selected&&c.quietScore>0&&c.quietScore<3.0)continue;
+        let v=votes.get(c.value);
+        if(!v){v={value:c.value,lines:new Set(),hits:0,bestScore:999,bestQuiet:0};votes.set(c.value,v)}
+        v.lines.add(y);v.hits++;v.bestScore=Math.min(v.bestScore,c.score);v.bestQuiet=Math.max(v.bestQuiet,c.quietScore||0);
+      }
+    }
+  }
+  return [...votes.values()].map(v=>({...v,lineVotes:v.lines.size,confidence:Math.min(1,(v.lines.size/6)+Math.max(0,.30-v.bestScore))}))
+    .filter(v=>selected?(v.lineVotes>=2||v.bestScore<=.17):(v.lineVotes>=3&&v.bestScore<=.27))
+    .sort((a,b)=>b.lineVotes-a.lineVotes||a.bestScore-b.bestScore||b.value.length-a.value.length);
+}
+function prsDetectCode11Direct(source,{selected=false}={}){
+  const image=sourceImageData(source,3200);if(!image)return [];
+  return prsCode11ScanImageData(image,selected).map(x=>({rawValue:x.value,text:x.value,format:'code11',symbology:'Code 11',confidence:x.confidence,lineVotes:x.lineVotes,bestScore:x.bestScore,engine:'PRS native Code11'}));
+}
+
+// ---------------------------------------------------------------------------
 // V2 PATCH 14 — STRICT FULL-LENGTH LINEAR BARCODE DECODER
 // ---------------------------------------------------------------------------
 // Patch 13 could accept the first plausible value from a permissive fallback.
@@ -1530,7 +1669,7 @@ function patch14Choose(candidates,mode=patch14Mode()){
     const top=g.items[0];
     // A trusted structural decoder may stand alone. Permissive/custom fallbacks
     // must repeat the SAME full value on independent image passes.
-    const trusted=g.items.some(x=>x.engine==='ZXing-C++'||x.engine==='Sythos-camera');
+    const trusted=g.items.some(x=>x.engine==='ZXing-C++'||x.engine==='Sythos-camera'||x.engine==='PRS-Code11');
     const consensus=g.passes.size>=2||g.engines.size>=2;
     if(trusted||consensus){
       const best=[...g.items].sort((a,b)=>(b.strict-a.strict)||(b.confidence-a.confidence))[0];
@@ -1596,14 +1735,27 @@ function patch14Special(source,candidates,pass,mode){
 async function patch14DecodeFile(file,mode=patch14Mode()){
   patch14LastDetection={mode,accepted:null,rejected:[],engines:[]};
   const candidates=[];
-  // The encoded original file goes to ZXing first. This is the highest-fidelity
-  // path and avoids any resampling of narrow bars.
-  await patch14ZXing(file,mode,candidates,'original');
-  let chosen=patch14Choose(candidates,mode);if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
-
-  let item=null;
+  let chosen=null,item=null;
   try{
     item=await loadImageElement(file);
+
+    // Patch 15: native Code-11 runs BEFORE generic decoders, including in Auto.
+    // This prevents Code-11 from being misidentified as a short fragment of a
+    // different linear symbology. Start + stop are mandatory.
+    if(mode==='code11'||mode==='auto'){
+      try{
+        const direct=prsDetectCode11Direct(item.img,{selected:mode==='code11'});
+        for(const hit of direct)patch14AddCandidate(candidates,{value:hit.rawValue,format:'code11',engine:'PRS-Code11',confidence:Number(hit.confidence||1),pass:`native-${hit.lineVotes||0}-lines`,strict:true,mode});
+        chosen=patch14Choose(candidates,mode);
+        if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
+      }catch(error){console.debug('Patch15 native Code11 pass failed',error)}
+    }
+
+    // Other barcode families keep Patch 14's high-fidelity original-file ZXing
+    // pass after Code-11 has had the first chance to identify its own grammar.
+    await patch14ZXing(file,mode,candidates,'original');
+    chosen=patch14Choose(candidates,mode);if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
+
     const variants=[
       {name:'full',band:1,center:.5,contrast:1,maxSide:3200},
       {name:'wide',band:.78,center:.5,contrast:1,maxSide:3200},
@@ -1616,6 +1768,12 @@ async function patch14DecodeFile(file,mode=patch14Mode()){
       const d=variants[i],canvas=makeBarcodeVariantCanvas(item.img,d);if(!canvas)continue;
       try{
         if($('scanStatus')&&!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=`Reading full ${patch14Cfg(mode).label}… validation pass ${i+1}/${variants.length}.`;
+        if(mode==='code11'||mode==='auto'){
+          try{
+            const direct=prsDetectCode11Direct(canvas,{selected:mode==='code11'});
+            for(const hit of direct)patch14AddCandidate(candidates,{value:hit.rawValue,format:'code11',engine:'PRS-Code11',confidence:Number(hit.confidence||1),pass:`native-${d.name}-${hit.lineVotes||0}`,strict:true,mode});
+          }catch(error){console.debug('Patch15 native Code11 variant failed',d.name,error)}
+        }
         // Strict camera profile first. Upstream intentionally returns [] instead
         // of partial/low-confidence 1D payloads in this profile.
         await patch14Sythos(canvas,mode,candidates,d.name,{camera:true});
@@ -1794,8 +1952,8 @@ function openScanner(){
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
     if(captureLabel){captureLabel.hidden=false;captureLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='Strict full-code scanner ready (V2 Patch 14). Choose Barcode Type, then tap Open Camera & Scan. Auto mode rejects partial suffixes; for uncommon codes select the exact type.';
-    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureSythosEngine()]).then(()=>console.debug('Patch14 engines warmed')),0);
+    $('scanStatus').textContent='Code-11 native scanner ready (V2 Patch 15). Choose Barcode Type, then tap Open Camera & Scan. Auto mode rejects partial suffixes; for uncommon codes select the exact type.';
+    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureSythosEngine()]).then(()=>console.debug('Patch15 engines warmed')),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
     if(captureLabel)captureLabel.hidden=true;

@@ -1,0 +1,21 @@
+PATCH 15 TECHNICAL CHANGE
+
+Why Patch 14 failed:
+The Code-11 path depended on an external extended-linear decoder. When it did not return a structurally trusted full value, strict validation correctly rejected the scan with "no complete ... value passed validation".
+
+Patch 15 adds a PRS-native Code-11 decoder that:
+- works from the original still photo before generic barcode engines;
+- implements the actual Code-11 symbol width grammar;
+- requires the Code-11 shared start/stop symbol at BOTH ends;
+- recognises 0-9 and dash;
+- validates the one-narrow-space inter-character separator;
+- evaluates 81 horizontal scan positions and three thresholds per position;
+- votes across independent scan rows;
+- never accepts a suffix-only decode as Code-11;
+- runs in Auto mode and explicit Code-11 mode.
+
+Regression fixture:
+The user-supplied TEC-IT screenshot barcode displaying 0123-4567 was decoded offline by the same run-width algorithm as exactly:
+  0123-4567
+
+Camera/photo capture and all other existing barcode paths remain unchanged.

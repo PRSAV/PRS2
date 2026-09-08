@@ -1,0 +1,24 @@
+PRS.AssetVerify V2 Patch 15 — Native Code-11
+
+BASELINE
+- Built directly on Patch 14.
+- Does not change the working iPhone/Android native still-photo capture flow.
+- Does not change Worker, D1, R2, records, exports, permissions, or CSS.
+
+DEPLOY
+Replace ONLY these root files in PRSAV/PRS2:
+1. app.js
+2. index.html
+3. sw.js
+
+Merge to main and wait for GitHub Pages deployment.
+Close all PRS tabs on the phone, then reopen the site.
+
+VERIFY
+Open Scan & Verify. The status must show:
+  Code-11 native scanner ready (V2 Patch 15).
+
+For the TEC-IT sample barcode containing 0123-4567:
+- Auto mode is supported.
+- Selecting Code 11 explicitly is still recommended for field use.
+- Capture the complete bars and leave some white margin on both sides.
