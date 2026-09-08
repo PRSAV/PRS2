@@ -1,8 +1,8 @@
-const CACHE = 'prs-assetverify-2-0-13-extended-linear';
+const CACHE = 'prs-assetverify-2-0-14-strict-full-linear';
 const CORE = [
   './',
   './index.html',
-  './app.js?v=213',
+  './app.js?v=214',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'

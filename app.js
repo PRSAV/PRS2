@@ -622,6 +622,7 @@ $('scanVerifyBtn').onclick=()=>openScanner();
 $('closeScannerBtn').onclick=closeScanner;
 $('startScannerBtn').onclick=startScanner;
 $('manualScanCode').addEventListener('input',renderScanCodes);
+$('barcodeTypeSelect')?.addEventListener('change',()=>{if(!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=`${patch14Cfg().label} selected. Capture the complete symbol; partial reads will not be accepted.`});
 
 function loadImageElement(file){
   return new Promise((resolve,reject)=>{
@@ -1392,6 +1393,263 @@ async function detectCodesFromImageFile(file){
 }
 
 
+// ---------------------------------------------------------------------------
+// V2 PATCH 14 — STRICT FULL-LENGTH LINEAR BARCODE DECODER
+// ---------------------------------------------------------------------------
+// Patch 13 could accept the first plausible value from a permissive fallback.
+// On a clipped 1D symbol that can be only the final 1–2 digits. Patch 14 changes
+// that rule: mobile scanning uses a still photo and only accepts a complete,
+// structurally validated result. Uncommon formats can be selected explicitly so
+// a Code 11 / MSI / Telepen pattern is never guessed as another symbology.
+let patch14LastDetection={mode:'auto',accepted:null,rejected:[],engines:[]};
+
+const PATCH14_MODES={
+  auto:{label:'Auto',zxing:['LinearCodes'],sythos:['code128','gs1128','code39','code93','itf','code11','msi','telepen'],min:3},
+  code128:{label:'Code 128',zxing:['Code128'],sythos:['code128'],min:2},
+  gs1128:{label:'GS1-128',zxing:['Code128'],sythos:['gs1128'],min:2},
+  code11:{label:'Code 11',zxing:[],sythos:['code11'],min:2},
+  itf:{label:'Interleaved 2 of 5',zxing:['ITF'],sythos:['itf'],min:4,numeric:true},
+  code39:{label:'Code 39',zxing:['Code39'],sythos:['code39'],min:2},
+  code39ext:{label:'Code 39 Full ASCII',zxing:['Code39'],sythos:['code39'],min:2,code39Extended:true},
+  code93:{label:'Code 93',zxing:['Code93'],sythos:['code93'],min:2},
+  msi:{label:'MSI Plessey',zxing:[],sythos:['msi'],min:3,numeric:true},
+  telepen:{label:'Telepen Alpha',zxing:['Telepen'],sythos:['telepen'],min:2},
+  pharmacode1:{label:'Pharmacode One-Track',zxing:[],sythos:[],min:1,numeric:true,special:'pharmacode1'},
+  pharmacode2:{label:'Pharmacode Two-Track',zxing:[],sythos:[],min:1,numeric:true,special:'pharmacode2'},
+  flattermarken:{label:'Flattermarken',zxing:[],sythos:[],min:9,numeric:true,special:'flattermarken'}
+};
+
+function patch14Mode(){
+  const key=String($('barcodeTypeSelect')?.value||'auto');
+  return PATCH14_MODES[key]?key:'auto';
+}
+function patch14Cfg(mode=patch14Mode()){return PATCH14_MODES[mode]||PATCH14_MODES.auto}
+function isAndroidDevice(){return /Android/i.test(navigator.userAgent||'')}
+function isMobileBarcodeDevice(){return isIOSDevice()||isAndroidDevice()}
+function patch14CleanText(value){
+  let s=String(value??'').replace(/\u0000/g,'').trim();
+  // Preserve the GS1 separator semantically but make it visible/editable.
+  s=s.replace(/\x1D/g,'<GS>');
+  return s;
+}
+function patch14TextFromZXing(result){
+  let text=patch14CleanText(result?.text??result?.rawValue??'');
+  const bogus=!text||/^[?\uFFFD]+$/.test(text);
+  const bytes=result?.bytes;
+  if(bogus&&bytes&&typeof TextDecoder==='function'){
+    try{
+      const arr=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+      for(const enc of ['utf-8','windows-1252']){
+        try{
+          const candidate=patch14CleanText(new TextDecoder(enc,{fatal:enc==='utf-8'}).decode(arr));
+          if(candidate&&!/^[?\uFFFD]+$/.test(candidate)){text=candidate;break}
+        }catch{}
+      }
+    }catch{}
+  }
+  return text;
+}
+function patch14Family(format=''){
+  const f=String(format||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(f.includes('gs1128'))return 'gs1128';
+  if(f.includes('code128'))return 'code128';
+  if(f.includes('code11'))return 'code11';
+  if(f.includes('code39'))return 'code39';
+  if(f.includes('code93'))return 'code93';
+  if(f.includes('telepen'))return 'telepen';
+  if(f.includes('itf')||f.includes('2of5'))return 'itf';
+  if(f.includes('msi'))return 'msi';
+  if(f.includes('pharmacode2'))return 'pharmacode2';
+  if(f.includes('pharmacode'))return 'pharmacode1';
+  if(f.includes('flatter'))return 'flattermarken';
+  if(f.includes('ean13'))return 'ean13';
+  if(f.includes('ean8'))return 'ean8';
+  if(f.includes('upca'))return 'upca';
+  if(f.includes('upce'))return 'upce';
+  if(f.includes('databar'))return 'databar';
+  if(f.includes('codabar'))return 'codabar';
+  return f||'unknown';
+}
+function patch14Compatible(mode,family){
+  if(mode==='auto')return ['code128','gs1128','code11','itf','code39','code93','msi','telepen','ean13','ean8','upca','upce','databar','codabar'].includes(family);
+  if(mode==='code39ext')return family==='code39';
+  if(mode==='gs1128')return family==='gs1128'||family==='code128';
+  return mode===family;
+}
+function patch14CandidateValid(value,format='',mode=patch14Mode(),engine=''){
+  const cfg=patch14Cfg(mode),text=patch14CleanText(value),family=patch14Family(format);
+  if(!text||text.length>500)return false;
+  if(/^[?\uFFFD]+$/.test(text))return false;
+  if(text.includes('\uFFFD'))return false;
+  if(!patch14Compatible(mode,family)&&family!=='unknown')return false;
+  // Auto mode deliberately rejects very short reads. These are the exact
+  // partial-suffix failures observed on Android and are not safe to auto-save.
+  if(mode==='auto'&&text.length<3)return false;
+  if(text.length<Number(cfg.min||1))return false;
+  if(cfg.numeric&&!/^\d+$/.test(text))return false;
+  if(family==='ean13'&&(!/^\d{13}$/.test(text)||!eanUpcChecksumValid(text)))return false;
+  if(family==='ean8'&&(!/^\d{8}$/.test(text)||!eanUpcChecksumValid(text)))return false;
+  if(family==='upca'&&(!/^\d{12}$/.test(text)||!eanUpcChecksumValid(text)))return false;
+  if(family==='upce'&&!/^\d{6,8}$/.test(text))return false;
+  if((family==='itf'||mode==='itf')&&!/^\d{4,}$/.test(text))return false;
+  if((family==='msi'||mode==='msi')&&!/^\d{3,}$/.test(text))return false;
+  if(mode==='flattermarken'&&!/^\d{9}$/.test(text))return false;
+  if(mode==='pharmacode1'){
+    const n=Number(text);if(!/^\d+$/.test(text)||n<3||n>131070)return false;
+  }
+  if(mode==='pharmacode2'){
+    const n=Number(text);if(!/^\d+$/.test(text)||n<4||n>64570080)return false;
+  }
+  return true;
+}
+function patch14AddCandidate(list,{value,format='',engine='',confidence=0,pass='',strict=false,mode=patch14Mode()}){
+  const text=patch14CleanText(value),family=patch14Family(format);
+  if(!patch14CandidateValid(text,format,mode,engine)){
+    patch14LastDetection.rejected.push({value:text.slice(0,80),format,family,engine,pass,reason:'validation'});
+    return;
+  }
+  list.push({value:text,format,family,engine,confidence:Number(confidence||0),pass,strict,mode});
+}
+function patch14Choose(candidates,mode=patch14Mode()){
+  if(!candidates.length)return null;
+  const byValue=new Map();
+  for(const c of candidates){
+    const k=c.value;
+    if(!byValue.has(k))byValue.set(k,{value:k,items:[],engines:new Set(),passes:new Set(),score:0});
+    const g=byValue.get(k);g.items.push(c);g.engines.add(c.engine);g.passes.add(c.pass);
+    let w=c.strict?5:2;
+    if(c.engine==='ZXing-C++')w+=4;
+    if(c.engine==='Sythos-camera')w+=4;
+    if(c.engine==='Sythos-consensus')w+=3;
+    if(c.engine==='Quagga-consensus')w+=2;
+    w+=Math.min(2,Math.max(0,c.confidence||0)*2);
+    g.score+=w;
+  }
+  const ranked=[...byValue.values()].sort((a,b)=>b.score-a.score||b.items.length-a.items.length||b.value.length-a.value.length);
+  for(const g of ranked){
+    const top=g.items[0];
+    // A trusted structural decoder may stand alone. Permissive/custom fallbacks
+    // must repeat the SAME full value on independent image passes.
+    const trusted=g.items.some(x=>x.engine==='ZXing-C++'||x.engine==='Sythos-camera');
+    const consensus=g.passes.size>=2||g.engines.size>=2;
+    if(trusted||consensus){
+      const best=[...g.items].sort((a,b)=>(b.strict-a.strict)||(b.confidence-a.confidence))[0];
+      return {...best,votes:g.items.length,score:g.score};
+    }
+  }
+  return null;
+}
+async function patch14ZXing(source,mode,candidates,pass){
+  const cfg=patch14Cfg(mode);if(!cfg.zxing?.length)return;
+  let engine;try{engine=await ensureZXingWasmEngine()}catch{return}
+  let input;try{input=await zxingInputFromSource(source)}catch{return}
+  if(!input)return;
+  const formatSets=[];
+  if(mode==='auto')formatSets.push(['LinearCodes'],['AllLinear']);
+  else formatSets.push(cfg.zxing);
+  for(const formats of formatSets){
+    const options={formats,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false,minLineCount:2,maxNumberOfSymbols:8,validateOptionalChecksum:false,textMode:'Plain'};
+    if(cfg.code39Extended)options.tryCode39ExtendedMode=true;
+    try{
+      const results=await engine.readBarcodes(input,options)||[];
+      for(const r of results){
+        if(r?.isValid===false)continue;
+        const text=patch14TextFromZXing(r),format=String(r?.format||'');
+        patch14AddCandidate(candidates,{value:text,format,engine:'ZXing-C++',confidence:1,pass,strict:true,mode});
+      }
+    }catch(error){console.debug('Patch14 ZXing pass failed',formats,error)}
+    if(candidates.some(c=>c.engine==='ZXing-C++'&&c.pass===pass))break;
+  }
+}
+async function patch14Sythos(source,mode,candidates,pass,{camera=true}={}){
+  const cfg=patch14Cfg(mode);if(!cfg.sythos?.length)return;
+  let engine;try{engine=await ensureSythosEngine()}catch{return}
+  const image=sourceImageData(source,3000);if(!image)return;
+  const options={formats:cfg.sythos,tryHarder:true};
+  if(camera)options.profile='camera';
+  try{
+    const hits=engine.decode(image,options)||[];
+    for(const hit of hits){
+      const text=patch14CleanText(hit?.text??hit?.rawValue??''),format=String(hit?.format||cfg.sythos[0]||'');
+      patch14AddCandidate(candidates,{value:text,format,engine:camera?'Sythos-camera':'Sythos-consensus',confidence:Number(hit?.confidence||0),pass,strict:camera,mode});
+    }
+  }catch(error){console.debug('Patch14 Sythos pass failed',mode,pass,error)}
+}
+async function patch14QuaggaPharmacode(source,candidates,pass,mode){
+  if(mode!=='pharmacode1')return;
+  try{
+    const canvas=source instanceof HTMLCanvasElement?source:null;
+    if(!canvas)return;
+    const src=await canvasDataUrl(canvas);
+    const hit=await quaggaDecodeDataUrl(src,['pharmacode_reader'],{locate:true,patchSize:'large',timeoutMs:7000});
+    if(hit)patch14AddCandidate(candidates,{value:hit.rawValue,format:'pharmacode',engine:'Quagga-consensus',pass,strict:false,mode});
+  }catch(error){console.debug('Patch14 pharmacode pass failed',error)}
+}
+function patch14Special(source,candidates,pass,mode){
+  try{
+    let hits=[];
+    if(mode==='pharmacode2')hits=detectPharmacodeTwoTrack(source);
+    else if(mode==='flattermarken')hits=detectFlattermarken9(source);
+    for(const hit of hits||[])patch14AddCandidate(candidates,{value:scanRawValue(hit),format:hit?.format||mode,engine:'Special-consensus',confidence:Number(hit?.confidence||0),pass,strict:false,mode});
+  }catch(error){console.debug('Patch14 special pass failed',mode,error)}
+}
+async function patch14DecodeFile(file,mode=patch14Mode()){
+  patch14LastDetection={mode,accepted:null,rejected:[],engines:[]};
+  const candidates=[];
+  // The encoded original file goes to ZXing first. This is the highest-fidelity
+  // path and avoids any resampling of narrow bars.
+  await patch14ZXing(file,mode,candidates,'original');
+  let chosen=patch14Choose(candidates,mode);if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
+
+  let item=null;
+  try{
+    item=await loadImageElement(file);
+    const variants=[
+      {name:'full',band:1,center:.5,contrast:1,maxSide:3200},
+      {name:'wide',band:.78,center:.5,contrast:1,maxSide:3200},
+      {name:'centre',band:.55,center:.5,contrast:1.2,maxSide:3000},
+      {name:'contrast',band:.72,center:.5,contrast:1.65,maxSide:2800},
+      {name:'threshold',band:.68,center:.5,contrast:1.15,threshold:true,maxSide:2600},
+      {name:'rot90',band:1,center:.5,rotate:90,contrast:1.15,maxSide:3000}
+    ];
+    for(let i=0;i<variants.length;i++){
+      const d=variants[i],canvas=makeBarcodeVariantCanvas(item.img,d);if(!canvas)continue;
+      try{
+        if($('scanStatus')&&!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=`Reading full ${patch14Cfg(mode).label}… validation pass ${i+1}/${variants.length}.`;
+        // Strict camera profile first. Upstream intentionally returns [] instead
+        // of partial/low-confidence 1D payloads in this profile.
+        await patch14Sythos(canvas,mode,candidates,d.name,{camera:true});
+        await patch14ZXing(canvas,mode,candidates,d.name);
+        if(mode==='pharmacode1')await patch14QuaggaPharmacode(canvas,candidates,d.name,mode);
+        if(mode==='pharmacode2'||mode==='flattermarken')patch14Special(canvas,candidates,d.name,mode);
+        chosen=patch14Choose(candidates,mode);if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
+      }finally{try{canvas.width=1;canvas.height=1}catch{}}
+      await new Promise(r=>setTimeout(r,0));
+    }
+    // Some real Code 11/MSI labels omit the optional check digit. Strict camera
+    // mode can reject them by design. For an explicitly selected type only, do a
+    // permissive scan but require the exact same complete value on >=2 passes.
+    if(['code11','msi','itf','telepen','code39','code39ext','code93','gs1128'].includes(mode)){
+      for(const d of variants.slice(0,5)){
+        const canvas=makeBarcodeVariantCanvas(item.img,d);if(!canvas)continue;
+        try{await patch14Sythos(canvas,mode,candidates,'loose-'+d.name,{camera:false})}finally{try{canvas.width=1;canvas.height=1}catch{}}
+      }
+      chosen=patch14Choose(candidates,mode);if(chosen){patch14LastDetection.accepted=chosen;return [chosen.value]}
+    }
+    return [];
+  }finally{if(item?.url)try{URL.revokeObjectURL(item.url)}catch{}}
+}
+
+// Replace Patch 13's permissive first-hit image routine with strict arbitration.
+async function detectCodesFromImageFile(file){return patch14DecodeFile(file,patch14Mode())}
+function patch14DetectionSummary(){
+  const a=patch14LastDetection?.accepted;
+  if(a)return `${patch14Cfg(patch14LastDetection.mode).label} · ${a.engine} · ${a.format||a.family||'linear'} · full-code validated`;
+  const rej=(patch14LastDetection?.rejected||[]).slice(-3).map(x=>`${x.engine}:${x.value||'∅'}`).join(', ');
+  return rej?`Rejected partial/invalid candidates: ${rej}`:'No structurally complete candidate returned';
+}
+
+
 function showCapturedScanPhoto(file){
   const root=$('qrReader');
   if(!root||!file)return;
@@ -1425,15 +1683,15 @@ function ensureIOSScanCameraInput(){
 
     scanEvidenceFiles=[file];
     showCapturedScanPhoto(file);
-    $('scanStatus').textContent='Photo captured. Reading linear code with Patch 13 extended decoders…';
+    $('scanStatus').textContent=`Photo captured. Reading ${patch14Cfg().label} with strict full-code validation…`;
     let codes=[];
-    try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('iPhone captured-image scan failed:',error)}
+    try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('Captured-image barcode scan failed:',error)}
     if(codes.length){
       scanCodes=[...new Set(codes)];
       $('manualScanCode').value=scanCodes[0]||'';
       renderScanCodes();
       scannerAutoProceed=true;
-      $('scanStatus').textContent=`Code detected: ${scanCodes[0]}. Photo attached. Opening verification…`;
+      $('scanStatus').textContent=`Code detected: ${scanCodes[0]}. ${patch14DetectionSummary()}. Photo attached. Opening verification…`;
       try{navigator.vibrate?.(100)}catch{}
       const finalCodes=[...scanCodes];
       await closeScanner();
@@ -1442,7 +1700,7 @@ function ensureIOSScanCameraInput(){
     }
     scannerAutoProceed=false;
     renderScanCodes();
-    $('scanStatus').textContent=`Photo captured, but the linear code was not read automatically. Retake closer/sharper with the full mark field visible. For ordinary barcodes keep blank margins on both sides; for Two-Track Pharmacode keep the full bar height visible. ${barcodeEngineSummary()} The photo is already attached.`;
+    $('scanStatus').textContent=`Photo captured, but no COMPLETE ${patch14Cfg().label} value passed validation. Retake with the whole symbol and both quiet margins visible. ${patch14DetectionSummary()}. The evidence photo is already attached.`;
   });
   document.body.appendChild(input);
   iosScanCameraInput=input;
@@ -1456,7 +1714,7 @@ function startIOSNativeScanCamera(){
   iosScanCaptureBusy=true;
   scannerAutoProceed=false;
   button.disabled=true;button.textContent='Opening Camera…';
-  $('scanStatus').textContent='Opening iPhone rear camera… take a clear photo with the complete barcode visible, including blank margins on both sides.';
+  $('scanStatus').textContent=`Opening rear camera… capture the COMPLETE ${patch14Cfg().label} symbol, including blank margins on both sides.`;
   try{
     invokePickerNow(input);
     // Safari returns control after the camera UI closes. A timer only prevents a
@@ -1464,7 +1722,7 @@ function startIOSNativeScanCamera(){
     setTimeout(()=>{if(iosScanCaptureBusy){iosScanCaptureBusy=false;button.disabled=false;button.textContent='Open Camera & Scan'}},5000);
   }catch(error){
     iosScanCaptureBusy=false;button.disabled=false;button.textContent='Open Camera & Scan';
-    $('scanStatus').textContent=`iPhone camera could not open. ${cameraErrorMessage(error)}`;
+    $('scanStatus').textContent=`Camera could not open. ${cameraErrorMessage(error)}`;
   }
 }
 
@@ -1512,7 +1770,7 @@ $('useScanCodeBtn').onclick=async()=>{
   if(!evidence.length){
     scannerAutoProceed=false;
     toast('A photo is compulsory for every scanned tag.',4500);
-    $('scanStatus').textContent=isIOSDevice()
+    $('scanStatus').textContent=isMobileBarcodeDevice()
       ?'No evidence photo exists yet. Tap Open Camera & Scan, take the photo, then scan/enter the code.'
       :'No evidence photo was captured. Keep the camera open and try Use Code(s) & Verify again, or use Scan Image.';
     return;
@@ -1526,23 +1784,22 @@ function openScanner(){
   scanCodes=[];scanEvidenceFiles=[];scannerAutoProceed=false;scannerFrameCount=0;
   $('manualScanCode').value='';renderScanCodes();$('qrReader').innerHTML='';
   $('scannerModal').classList.remove('hidden');
-  const ios=isIOSDevice();
+  const mobile=isMobileBarcodeDevice();
   const startBtn=$('startScannerBtn');
-  const iosLabel=$('iosScanCameraLabel');
-  if(ios){
-    // Create the real capture input before the user taps the label. The label is
-    // directly associated with this file input, so iOS receives a genuine user
-    // activation instead of a synthetic input.click().
+  const captureLabel=$('iosScanCameraLabel');
+  if(mobile){
+    // Patch 14 deliberately uses the SAME still-photo barcode pipeline on iOS
+    // and Android. A still photo contains the full left/right quiet zones and
+    // prevents a live-frame decoder from accepting only the final digits.
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
-    if(iosLabel){iosLabel.hidden=false;iosLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='Extended linear scanner ready (V2 Patch 13). Tap Open Camera & Scan. Supports Code 128, Code 11, Interleaved/Industrial 2 of 5, Code 39 + Full ASCII, Code 93, GS1-128, MSI, Pharmacode One-Track, Pharmacode Two-Track, Telepen Alpha and 9-position Flattermarken. Keep the complete bars and quiet margins visible.';
-    // Warm the standard and extended decoders in the background. This never blocks the native camera.
-    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureQuaggaEngine(),ensureSythosEngine()]).then(()=>console.debug(barcodeEngineSummary())),0);
+    if(captureLabel){captureLabel.hidden=false;captureLabel.textContent='Open Camera & Scan'}
+    $('scanStatus').textContent='Strict full-code scanner ready (V2 Patch 14). Choose Barcode Type, then tap Open Camera & Scan. Auto mode rejects partial suffixes; for uncommon codes select the exact type.';
+    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureSythosEngine()]).then(()=>console.debug('Patch14 engines warmed')),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
-    if(iosLabel)iosLabel.hidden=true;
-    $('scanStatus').textContent='Tap Start Camera. Keep the complete barcode, including blank margins on both sides, inside the frame.';
+    if(captureLabel)captureLabel.hidden=true;
+    $('scanStatus').textContent='Desktop live scanner ready. For difficult 1D codes, use Scan Image and select the exact Barcode Type.';
   }
 }
 

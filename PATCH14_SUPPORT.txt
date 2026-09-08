@@ -1,0 +1,19 @@
+PATCH 14 TARGET LINEAR FORMATS
+
+Auto + exact mode:
+- Code 128
+- GS1-128 / UCC-EAN-128
+- Code 11
+- Interleaved 2 of 5 (ITF)
+- Code 39
+- Code 39 Full ASCII / Extended
+- Code 93
+- MSI / MSI Plessey
+- Telepen Alpha
+- Pharmacode One-Track (exact mode; repeated-consensus fallback)
+- Pharmacode Two-Track (exact mode; geometry decoder requires repeated agreement)
+- Flattermarken (exact mode; geometry decoder requires repeated agreement)
+
+Also retained through ZXing Auto: EAN-13, EAN-8, UPC-A, UPC-E, GS1 DataBar, Codabar.
+
+Patch 14 intentionally prioritises full-code correctness over returning a guess. If the app cannot validate the full symbol it leaves the evidence photo attached and asks for a retake/manual value instead of saving a partial suffix.

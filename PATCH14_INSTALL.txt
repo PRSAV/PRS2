@@ -1,0 +1,21 @@
+PRS.AssetVerify V2 — PATCH 14 STRICT FULL-CODE LINEAR
+
+BASELINE
+Patch 13, preserving the working Patch 10 native camera capture.
+
+DEPLOY
+Replace ONLY these root files in PRSAV/PRS2:
+  app.js
+  index.html
+  sw.js
+Do not change Worker, D1, R2, styles.css, manifest, records or company data.
+
+After merge to main:
+1. Wait for GitHub Pages deployment.
+2. Close every PRS tab on iPhone/Android.
+3. Reopen the site.
+4. Scan & Verify must say: Strict full-code scanner ready (V2 Patch 14).
+5. Choose Barcode Type. Use Auto for Code128/39/93/ITF/retail codes; select exact type for Code11, MSI, Telepen, Pharmacode or Flattermarken.
+
+KEY FIX
+Patch 13 could accept the first plausible partial read. Patch 14 never auto-saves a short suffix merely because one decoder returned it. Mobile scans use a still photo on BOTH iPhone and Android, and candidates must be structurally trusted or repeat consistently across independent image passes.

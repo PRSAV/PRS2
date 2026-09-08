@@ -1,0 +1,8 @@
+PATCH 14 TEST
+
+1. Confirm scanner banner says V2 Patch 14.
+2. On BOTH iPhone and Android choose an exact barcode type before testing uncommon formats.
+3. Photograph the complete symbol with both blank side margins.
+4. Verify Scanned Code contains the ENTIRE payload, not only the last digits.
+5. If a read is rejected, copy the full on-screen diagnostic line.
+6. Test Code128 first as regression, then Code39, Code93, ITF, Code11, MSI, Telepen.
