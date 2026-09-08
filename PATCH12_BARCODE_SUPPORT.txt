@@ -1,0 +1,37 @@
+PRS.AssetVerify V2 Patch 12 — Barcode Support
+==============================================
+
+BARCODE-FIRST / PRIMARY TARGETS
+- Code 128
+- GS1-128 / UCC-EAN-128
+- Code 39
+- Code 93
+- UPC-A
+- UPC-E
+- EAN-13
+- EAN-8
+- ITF / Interleaved 2 of 5
+- ITF-14
+- Standard / Industrial 2 of 5 (fallback)
+- Codabar
+- GS1 DataBar family (ZXing-C++)
+- MSI / Modified Plessey (fallback)
+- Code 32 (Quagga2)
+- Pharmacode (Quagga2 / JS fallback)
+- Telepen and additional ZXing-C++ linear formats may also decode through AllLinear.
+
+QR / MATRIX
+Existing QR / matrix capability is preserved as a final compatibility fallback,
+but Patch 12 is intentionally tuned for 1D barcodes first.
+
+CAPTURE GUIDANCE
+1D barcodes need their "quiet zones" — blank space immediately to the left and
+right of the bars. The app now preserves these areas during preprocessing, but the
+camera cannot reconstruct margins that were cut out of the original photo.
+For best results:
+- keep the whole barcode in the photo;
+- include blank space on BOTH sides;
+- let the bars occupy most of the image width;
+- avoid glare crossing the bars;
+- hold the phone parallel to the label;
+- tap the barcode area to focus before taking the photo when iOS allows it.

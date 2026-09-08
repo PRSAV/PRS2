@@ -1,0 +1,28 @@
+PATCH 12 BARCODE TEST CHECKLIST
+===============================
+
+After deployment confirm the Scan & Verify modal says "V2 Patch 12".
+
+Test at minimum:
+[ ] Code 128 asset tag
+[ ] Code 39 tag
+[ ] EAN-13 retail barcode
+[ ] UPC-A barcode
+[ ] ITF / ITF-14 barcode
+[ ] Code 93 barcode
+[ ] Codabar barcode
+[ ] GS1 DataBar if available
+[ ] MSI if available
+
+For EACH test:
+[ ] Native camera opens
+[ ] Full barcode + blank left/right margins are visible in photo
+[ ] Code auto-populates Scanned Code
+[ ] Same photo is attached as evidence
+[ ] Save Verification succeeds
+[ ] Recent record shows photo
+[ ] Export with Photos contains the evidence photo
+
+If a barcode still fails, do NOT manually enter it immediately. First note the
+engine diagnostics shown at the end of the failure message (ZXing / Quagga2 /
+JS fallback) and keep the failed evidence photo for debugging.

@@ -636,22 +636,53 @@ function loadImageElement(file){
 let scannerEngineLoadPromise=null;
 let scannerEngineSource='';
 let zxingEngineLoadPromise=null;
-let msiEngineLoadPromise=null;
+let quaggaEngineLoadPromise=null;
+let jsBarcodeEngineLoadPromise=null;
+const barcodeEngineState={zxing:'idle',quagga:'idle',js:'idle',legacy:'idle'};
+function barcodeEngineSummary(){return `Engines — ZXing: ${barcodeEngineState.zxing}; Quagga2: ${barcodeEngineState.quagga}; JS fallback: ${barcodeEngineState.js}`;}
 
-// Patch 11 primary decoder: ZXing-C++ WebAssembly via zxing-wasm.
-// It supports QR (Model 1/2), Micro QR, rMQR, EAN/UPC, DataBar variants,
-// Code 39/93/128, ITF, Codabar, Data Matrix, PDF417/MicroPDF417, Aztec,
-// Telepen and other readable ZXing-C++ symbologies. The browser's native
-// BarcodeDetector / ZBar polyfill remains as a fallback, and MSI/Plessey gets
-// a dedicated pure-JS fallback because it is not currently a ZXing-C++ reader.
+// V2 PATCH 12 — BARCODE-FIRST DECODER
+// The camera workflow from Patch 10/11 is intentionally unchanged. This patch
+// replaces only the decoding layer and is tuned first for linear / 1D barcodes.
+//
+// Primary engine: ZXing-C++ WASM (all linear formats, original photo first).
+// Secondary engine: Quagga2 (specialised 1D locator/decoder on prepared images).
+// Tertiary engine: browser BarcodeDetector / ZBar fallback.
+// Final linear fallback: javascript-barcode-reader (incl. MSI).
+//
+// Important for 1D symbols: prepared passes NEVER crop the left/right edges of
+// the image. Quiet zones on both sides of a barcode are part of the symbol and
+// cutting them is a common reason QR succeeds while Code128/EAN/UPC fails.
 const ZXING_WASM_VERSION='3.1.3';
 const ZXING_IIFE_URLS=[
   `https://cdn.jsdelivr.net/npm/zxing-wasm@${ZXING_WASM_VERSION}/dist/iife/reader/index.js`,
   `https://unpkg.com/zxing-wasm@${ZXING_WASM_VERSION}/dist/iife/reader/index.js`
 ];
-const MSI_READER_URLS=[
-  'https://unpkg.com/javascript-barcode-reader@1.0.0',
-  'https://cdn.jsdelivr.net/npm/javascript-barcode-reader@1.0.0/dist/javascript-barcode-reader.js'
+const QUAGGA_VERSION='1.12.1';
+const QUAGGA_URLS=[
+  `https://cdn.jsdelivr.net/npm/@ericblade/quagga2@${QUAGGA_VERSION}/dist/quagga.min.js`,
+  `https://unpkg.com/@ericblade/quagga2@${QUAGGA_VERSION}/dist/quagga.min.js`
+];
+const JS_BARCODE_READER_URLS=[
+  'https://cdn.jsdelivr.net/npm/javascript-barcode-reader@1.0.0/dist/javascript-barcode-reader.umd.min.js',
+  'https://unpkg.com/javascript-barcode-reader@1.0.0/dist/javascript-barcode-reader.umd.min.js',
+  'https://unpkg.com/javascript-barcode-reader@1.0.0'
+];
+const ZXING_LINEAR_FORMATS=['AllLinear'];
+const QUAGGA_ALL_READERS=[
+  'code_128_reader','code_39_reader','code_93_reader','codabar_reader',
+  'ean_reader','ean_8_reader','upc_reader','upc_e_reader',
+  'i2of5_reader','2of5_reader','code_32_reader','pharmacode_reader'
+];
+const QUAGGA_GROUPS=[
+  ['code_128_reader','code_39_reader','code_93_reader','codabar_reader'],
+  ['ean_reader','ean_8_reader','upc_reader','upc_e_reader'],
+  ['i2of5_reader','2of5_reader','code_32_reader','pharmacode_reader']
+];
+const JS_BARCODE_TYPES=[
+  ['code-128','Code128'],['code-39','Code39'],['code-93','Code93'],
+  ['ean-13','EAN13'],['upc-a','UPCA'],['ean-8','EAN8'],['upc-e','UPCE'],
+  ['code-2of5','ITF','interleaved'],['code-2of5','Code2of5','industrial'],['codabar','Codabar'],['msi','MSI'],['pharmacode','Pharmacode']
 ];
 
 function scannerPolyfillClass(){
@@ -666,7 +697,7 @@ function scannerScriptLoaded(url){
   return [...document.scripts].some(s=>s.src===url && s.dataset.prsScannerLoaded==='1');
 }
 
-function loadScannerScript(url,timeoutMs=16000){
+function loadScannerScript(url,timeoutMs=20000){
   return new Promise((resolve,reject)=>{
     if(scannerScriptLoaded(url)){resolve();return}
     const existing=[...document.scripts].find(s=>s.src===url);
@@ -694,29 +725,64 @@ function loadScannerScript(url,timeoutMs=16000){
 }
 
 async function ensureZXingWasmEngine(){
-  if(window.ZXingWASM?.readBarcodes)return window.ZXingWASM;
+  if(window.ZXingWASM?.readBarcodes){barcodeEngineState.zxing='ready';return window.ZXingWASM;}
   if(zxingEngineLoadPromise)return zxingEngineLoadPromise;
   zxingEngineLoadPromise=(async()=>{
     let lastError=null;
     for(const url of ZXING_IIFE_URLS){
       try{
-        await loadScannerScript(url,20000);
-        if(window.ZXingWASM?.readBarcodes)return window.ZXingWASM;
-        throw new Error('ZXingWASM global did not expose readBarcodes');
-      }catch(error){lastError=error;console.warn('ZXing-C++ WASM load failed:',url,error)}
+        await loadScannerScript(url,24000);
+        if(window.ZXingWASM?.readBarcodes){barcodeEngineState.zxing='ready';return window.ZXingWASM;}
+        throw new Error('ZXingWASM did not expose readBarcodes');
+      }catch(error){lastError=error;barcodeEngineState.zxing='failed';console.warn('ZXing barcode engine load failed:',url,error)}
     }
-    throw lastError||new Error('Universal ZXing-C++ barcode engine could not load');
+    throw lastError||new Error('ZXing-C++ barcode engine could not load');
   })();
   try{return await zxingEngineLoadPromise}
   finally{if(!window.ZXingWASM?.readBarcodes)zxingEngineLoadPromise=null}
 }
 
-function sourceImageData(source,maxSide=1800){
+async function ensureQuaggaEngine(){
+  if(window.Quagga?.decodeSingle){barcodeEngineState.quagga='ready';return window.Quagga;}
+  if(quaggaEngineLoadPromise)return quaggaEngineLoadPromise;
+  quaggaEngineLoadPromise=(async()=>{
+    let lastError=null;
+    for(const url of QUAGGA_URLS){
+      try{
+        await loadScannerScript(url,24000);
+        if(window.Quagga?.decodeSingle){barcodeEngineState.quagga='ready';return window.Quagga;}
+        throw new Error('Quagga did not expose decodeSingle');
+      }catch(error){lastError=error;barcodeEngineState.quagga='failed';console.warn('Quagga2 barcode engine load failed:',url,error)}
+    }
+    throw lastError||new Error('Quagga2 barcode engine could not load');
+  })();
+  try{return await quaggaEngineLoadPromise}
+  finally{if(!window.Quagga?.decodeSingle)quaggaEngineLoadPromise=null}
+}
+
+async function ensureJSBarcodeEngine(){
+  if(typeof window.javascriptBarcodeReader==='function'){barcodeEngineState.js='ready';return window.javascriptBarcodeReader;}
+  if(jsBarcodeEngineLoadPromise)return jsBarcodeEngineLoadPromise;
+  jsBarcodeEngineLoadPromise=(async()=>{
+    let lastError=null;
+    for(const url of JS_BARCODE_READER_URLS){
+      try{
+        await loadScannerScript(url,18000);
+        if(typeof window.javascriptBarcodeReader==='function'){barcodeEngineState.js='ready';return window.javascriptBarcodeReader;}
+      }catch(error){lastError=error;barcodeEngineState.js='failed';console.warn('JS barcode fallback load failed:',url,error)}
+    }
+    throw lastError||new Error('Javascript barcode reader unavailable');
+  })();
+  try{return await jsBarcodeEngineLoadPromise}
+  finally{if(typeof window.javascriptBarcodeReader!=='function')jsBarcodeEngineLoadPromise=null}
+}
+
+function sourceImageData(source,maxSide=2600){
   if(typeof ImageData!=='undefined'&&source instanceof ImageData)return source;
   if(source?.data instanceof Uint8ClampedArray&&source?.width&&source?.height)return source;
   if(typeof HTMLCanvasElement!=='undefined'&&source instanceof HTMLCanvasElement){
     const ctx=source.getContext('2d',{willReadFrequently:true});
-    return ctx?.getImageData(0,0,source.width,source.height)||null;
+    try{return ctx?.getImageData(0,0,source.width,source.height)||null}catch{return null}
   }
   const sw=Number(source?.videoWidth||source?.naturalWidth||source?.width||0);
   const sh=Number(source?.videoHeight||source?.naturalHeight||source?.height||0);
@@ -733,42 +799,62 @@ function sourceImageData(source,maxSide=1800){
 async function zxingInputFromSource(source){
   if(typeof Blob!=='undefined'&&source instanceof Blob)return source;
   if(source instanceof ArrayBuffer||source instanceof Uint8Array)return source;
-  return sourceImageData(source,2200);
+  return sourceImageData(source,3000);
 }
 
 function normalizeZXingResults(results){
-  return (results||[]).map(r=>({
+  return (results||[]).filter(r=>r?.isValid!==false).map(r=>({
     rawValue:String(r?.text??r?.rawValue??'').trim(),
     text:String(r?.text??r?.rawValue??'').trim(),
-    format:String(r?.format||''),
-    symbology:String(r?.symbology||'')
+    format:String(r?.format||''),symbology:String(r?.symbology||''),isValid:r?.isValid!==false
   })).filter(r=>r.rawValue);
 }
 
-async function createZXingWasmDetector(){
+function eanUpcChecksumValid(value){
+  const s=String(value||'');
+  if(!/^\d+$/.test(s)||![8,12,13].includes(s.length))return true;
+  const digits=[...s].map(Number),check=digits.pop();
+  let sum=0,weight=3;
+  for(let i=digits.length-1;i>=0;i--){sum+=digits[i]*weight;weight=weight===3?1:3}
+  return (10-(sum%10))%10===check;
+}
+
+function barcodeCandidateValid(value,format=''){
+  const text=String(value??'').trim();
+  if(!text||text.length<2||text.length>400)return false;
+  const f=String(format||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(f.includes('ean13')||f==='ean')return /^\d{13}$/.test(text)&&eanUpcChecksumValid(text);
+  if(f.includes('ean8'))return /^\d{8}$/.test(text)&&eanUpcChecksumValid(text);
+  if(f.includes('upca')||f==='upc')return /^\d{12}$/.test(text)&&eanUpcChecksumValid(text);
+  if(f.includes('upce'))return /^\d{6,8}$/.test(text);
+  if(f.includes('itf')||f.includes('2of5'))return /^\d{4,}$/.test(text);
+  if(f.includes('msi'))return /^\d{3,}$/.test(text);
+  return true;
+}
+
+async function createZXingBarcodeDetector(){
   const engine=await ensureZXingWasmEngine();
-  scannerEngineSource=`ZXing-C++ WASM ${ZXING_WASM_VERSION}`;
+  scannerEngineSource=`ZXing-C++ linear ${ZXING_WASM_VERSION}`;
   return {
     async detect(source){
       const input=await zxingInputFromSource(source);
       if(!input)return [];
-      try{
-        const results=await engine.readBarcodes(input,{
-          formats:['AllReadable'],
-          tryHarder:true,
-          tryRotate:true,
-          tryInvert:true,
-          tryDownscale:true,
-          tryDenoise:true,
-          maxNumberOfSymbols:32
-        });
-        return normalizeZXingResults(results);
-      }catch(firstError){
-        // Keep a compatibility retry in case a future CDN build changes an
-        // option name while preserving the readBarcodes API.
-        try{return normalizeZXingResults(await engine.readBarcodes(input))}
-        catch{throw firstError}
+      const profiles=[
+        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:true,tryDenoise:true,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false},
+        // Second pass keeps every narrow module at source resolution. This helps
+        // small Code128 / EAN labels where automatic downscaling can merge bars.
+        {formats:ZXING_LINEAR_FORMATS,tryHarder:true,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false,minLineCount:1,maxNumberOfSymbols:16,validateOptionalChecksum:false}
+      ];
+      let firstError=null;
+      for(const options of profiles){
+        try{
+          const results=normalizeZXingResults(await engine.readBarcodes(input,options));
+          const valid=results.filter(r=>barcodeCandidateValid(r.rawValue,r.format));
+          if(valid.length)return valid;
+        }catch(error){if(!firstError)firstError=error;console.debug('ZXing linear pass failed:',error)}
       }
+      if(firstError)throw firstError;
+      return [];
     }
   };
 }
@@ -792,13 +878,15 @@ async function ensureScannerFallbackEngine(){
     for(const [base,label] of attempts){
       try{return await loadScannerPair(base,label)}catch(error){console.warn(`Scanner ${label} load failed`,error)}
     }
-    throw new Error('Fallback QR / barcode recognition could not load.');
+    throw new Error('Fallback barcode recognition could not load.');
   })();
   try{return await scannerEngineLoadPromise}
   finally{if(!scannerPolyfillClass())scannerEngineLoadPromise=null}
 }
 
 async function createLegacyDetector(){
+  // Keep QR / matrix formats here as a final compatibility fallback so Patch 12
+  // improves barcodes without taking away the QR capability that already worked.
   const requested=['aztec','code_128','code_39','code_93','codabar','data_matrix','ean_13','ean_8','itf','pdf417','qr_code','upc_a','upc_e'];
   const Native=nativeScannerClass();
   if(Native){
@@ -806,7 +894,6 @@ async function createLegacyDetector(){
       let supported=requested;
       if(typeof Native.getSupportedFormats==='function'){try{supported=await Native.getSupportedFormats()}catch{}}
       const usable=requested.filter(f=>!Array.isArray(supported)||supported.includes(f));
-      scannerEngineSource='native BarcodeDetector';
       try{return new Native(usable.length?{formats:usable}:undefined)}catch{return new Native()}
     }catch(error){console.warn('Native BarcodeDetector could not be initialised.',error)}
   }
@@ -817,60 +904,66 @@ async function createLegacyDetector(){
   try{return new Polyfill(usable.length?{formats:usable}:undefined)}catch{return new Polyfill()}
 }
 
-async function ensureMSIPlesseyEngine(){
-  if(typeof window.javascriptBarcodeReader==='function')return window.javascriptBarcodeReader;
-  if(msiEngineLoadPromise)return msiEngineLoadPromise;
-  msiEngineLoadPromise=(async()=>{
-    let last=null;
-    for(const url of MSI_READER_URLS){
-      try{
-        await loadScannerScript(url,14000);
-        if(typeof window.javascriptBarcodeReader==='function')return window.javascriptBarcodeReader;
-      }catch(error){last=error;console.warn('MSI/Plessey fallback load failed:',url,error)}
-    }
-    throw last||new Error('MSI/Plessey decoder unavailable');
-  })();
-  try{return await msiEngineLoadPromise}
-  finally{if(typeof window.javascriptBarcodeReader!=='function')msiEngineLoadPromise=null}
+function quaggaResultValue(result){
+  const value=String(result?.codeResult?.code||'').trim();
+  const format=String(result?.codeResult?.format||'');
+  if(!barcodeCandidateValid(value,format))return null;
+  return value?{rawValue:value,text:value,format,symbology:format}:null;
 }
 
-async function detectMSIPlessey(source){
+async function quaggaDecodeDataUrl(src,readers=QUAGGA_ALL_READERS,{locate=true,patchSize='large',timeoutMs=10000}={}){
+  const Quagga=await ensureQuaggaEngine();
+  return new Promise(resolve=>{
+    let settled=false;
+    const finish=value=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value)};
+    const timer=setTimeout(()=>finish(null),timeoutMs);
+    try{
+      Quagga.decodeSingle({
+        src,
+        numOfWorkers:0,
+        locate,
+        inputStream:{size:0,singleChannel:false},
+        locator:{halfSample:false,patchSize,willReadFrequently:true},
+        decoder:{readers,multiple:false}
+      },result=>finish(quaggaResultValue(result)));
+    }catch(error){console.debug('Quagga decode pass failed:',error);finish(null)}
+  });
+}
+
+async function detectJSBarcodeReader(source){
   let reader;
-  try{reader=await ensureMSIPlesseyEngine()}catch{return []}
-  const image=sourceImageData(source,2200);
+  try{reader=await ensureJSBarcodeEngine()}catch{return []}
+  const image=sourceImageData(source,2400);
   if(!image)return [];
-  try{
-    const result=await reader({
-      image,
-      barcode:'msi',
-      options:{useAdaptiveThreshold:true,detectRotation:true,locateBarcode:true}
-    });
-    const value=String(result?.text??result?.code??result?.value??result??'').trim();
-    return value?[{rawValue:value,text:value,format:'MSI',symbology:'MSIPlessey'}]:[];
-  }catch{return []}
+  for(const [type,format,barcodeType] of JS_BARCODE_TYPES){
+    try{
+      const options={useAdaptiveThreshold:true,detectRotation:true,locateBarcode:true,singlePass:false};
+      const args={image,barcode:type,options};
+      if(type==='code-2of5')args.barcodeType=barcodeType||'interleaved';
+      const result=await reader(args);
+      const value=String(result?.text??result?.code??result?.value??result??'').trim();
+      if(value&&barcodeCandidateValid(value,format))return [{rawValue:value,text:value,format,symbology:format}];
+    }catch{}
+  }
+  return [];
 }
 
 async function createScannerDetector(){
   let primary=null,legacy=null,legacyAttempted=false;
-  try{primary=await createZXingWasmDetector()}catch(error){console.warn('Universal ZXing-C++ engine unavailable; fallback will be used.',error)}
+  try{primary=await createZXingBarcodeDetector()}catch(error){console.warn('ZXing linear engine unavailable; fallback will be used.',error)}
   const getLegacy=async()=>{
     if(legacyAttempted)return legacy;
     legacyAttempted=true;
     try{legacy=await createLegacyDetector()}catch(error){console.warn('Legacy barcode engine unavailable.',error);legacy=null}
     return legacy;
   };
-  // If ZXing itself could not load, initialise the browser/ZBar fallback now so
-  // the user gets a useful error immediately instead of only after taking a photo.
   if(!primary)await getLegacy();
-  if(!primary&&!legacy)throw new Error('Universal QR / barcode recognition could not initialise. Check internet once and retry.');
+  if(!primary&&!legacy)throw new Error('Barcode recognition could not initialise. Check internet once and retry.');
   return {
     async detect(source){
       let results=[];
-      if(primary){try{results=await primary.detect(source)}catch(error){console.debug('ZXing universal decode pass failed:',error)}}
+      if(primary){try{results=await primary.detect(source)}catch(error){console.debug('ZXing barcode pass failed:',error)}}
       if(results?.length)return results;
-
-      // Browser BarcodeDetector and the MSI decoder prefer pixel/image sources.
-      // Convert a File/Blob only after the high-resolution ZXing pass has failed.
       let fallbackSource=source,bitmap=null;
       if(typeof Blob!=='undefined'&&source instanceof Blob&&typeof createImageBitmap==='function'){
         try{bitmap=await createImageBitmap(source,{imageOrientation:'from-image'});fallbackSource=bitmap}catch{}
@@ -879,7 +972,7 @@ async function createScannerDetector(){
         const fallback=await getLegacy();
         if(fallback){try{results=await fallback.detect(fallbackSource)}catch(error){console.debug('BarcodeDetector fallback pass failed:',error)}}
         if(results?.length)return results;
-        return await detectMSIPlessey(fallbackSource);
+        return await detectJSBarcodeReader(fallbackSource);
       }finally{try{bitmap?.close?.()}catch{}}
     }
   };
@@ -893,7 +986,7 @@ function scannerResultsValues(results){
   const out=[];
   for(const result of results||[]){
     const value=scanRawValue(result);
-    if(value&&!out.includes(value))out.push(value);
+    if(value&&barcodeCandidateValid(value,result?.format||result?.symbology||'')&&!out.includes(value))out.push(value);
   }
   return out;
 }
@@ -909,59 +1002,184 @@ async function detectWithScannerDetector(source){
   return values[0]||'';
 }
 
-function imagePassCanvas(img,{contrast=false,crop=.0}={}){
+function applyOtsuThreshold(canvas){
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});
+  if(!ctx)return canvas;
+  let image;
+  try{image=ctx.getImageData(0,0,canvas.width,canvas.height)}catch{return canvas}
+  const data=image.data,hist=new Uint32Array(256);
+  for(let i=0;i<data.length;i+=4){
+    const y=Math.max(0,Math.min(255,Math.round(.299*data[i]+.587*data[i+1]+.114*data[i+2])));hist[y]++;
+  }
+  const total=canvas.width*canvas.height;
+  let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
+  let sumB=0,wB=0,maxVar=-1,threshold=128;
+  for(let t=0;t<256;t++){
+    wB+=hist[t];if(!wB)continue;
+    const wF=total-wB;if(!wF)break;
+    sumB+=t*hist[t];
+    const mB=sumB/wB,mF=(sum-sumB)/wF,d=mB-mF,v=wB*wF*d*d;
+    if(v>maxVar){maxVar=v;threshold=t}
+  }
+  for(let i=0;i<data.length;i+=4){
+    const y=.299*data[i]+.587*data[i+1]+.114*data[i+2];const v=y<threshold?0:255;
+    data[i]=data[i+1]=data[i+2]=v;data[i+3]=255;
+  }
+  ctx.putImageData(image,0,0);return canvas;
+}
+
+function makeBarcodeVariantCanvas(img,{band=1,center=.5,rotate=0,contrast=1,threshold=false,maxSide=2800}={}){
   const iw=Number(img.naturalWidth||img.width||0),ih=Number(img.naturalHeight||img.height||0);
   if(!iw||!ih)return null;
-  const cropRatio=crop>0&&crop<1?crop:1;
-  const sw=Math.max(1,Math.round(iw*cropRatio)),sh=Math.max(1,Math.round(ih*cropRatio));
-  const sx=Math.max(0,Math.round((iw-sw)/2)),sy=Math.max(0,Math.round((ih-sh)/2));
-  const maxSide=1600;
-  const scale=Math.min(1,maxSide/Math.max(sw,sh));
-  const w=Math.max(1,Math.round(sw*scale)),h=Math.max(1,Math.round(sh*scale));
-  const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+  const safeBand=Math.max(.25,Math.min(1,Number(band)||1));
+  const sh=Math.max(1,Math.round(ih*safeBand));
+  const sy=Math.max(0,Math.min(ih-sh,Math.round((ih-sh)*Math.max(0,Math.min(1,Number(center)||.5)))));
+  // Deliberately preserve the FULL source width. Do not cut barcode quiet zones.
+  const sw=iw,sx=0;
+  const rot=Math.abs(Number(rotate)||0)%180===90;
+  const baseW=rot?sh:sw,baseH=rot?sw:sh;
+  let scale=Math.min(maxSide/Math.max(baseW,baseH),1.55);
+  if(Math.max(baseW,baseH)>=maxSide)scale=Math.min(scale,1);
+  const contentW=Math.max(1,Math.round(baseW*scale)),contentH=Math.max(1,Math.round(baseH*scale));
+  const pad=Math.max(24,Math.round(Math.min(contentW,contentH)*.025));
+  const canvas=document.createElement('canvas');canvas.width=contentW+pad*2;canvas.height=contentH+pad*2;
   const ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});
   if(!ctx)return null;
-  ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
-  ctx.save();ctx.filter=contrast?'grayscale(1) contrast(1.8)':'none';
-  ctx.drawImage(img,sx,sy,sw,sh,0,0,w,h);ctx.restore();
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.filter=contrast!==1?`grayscale(1) contrast(${contrast})`:'none';
+  if(rot){
+    ctx.translate(pad+contentW/2,pad+contentH/2);
+    ctx.rotate((Number(rotate)>0?1:-1)*Math.PI/2);
+    ctx.drawImage(img,sx,sy,sw,sh,-contentH/2,-contentW/2,contentH,contentW);
+  }else{
+    ctx.drawImage(img,sx,sy,sw,sh,pad,pad,contentW,contentH);
+  }
+  ctx.restore();
+  if(threshold)applyOtsuThreshold(canvas);
   return canvas;
 }
 
+function barcodeVariantDescriptors(){
+  return [
+    {name:'full',band:1,center:.5,contrast:1,maxSide:3000},
+    {name:'centre-wide',band:.72,center:.5,contrast:1,maxSide:3000},
+    {name:'centre-tight',band:.46,center:.5,contrast:1,maxSide:3000},
+    {name:'upper-band',band:.58,center:.18,contrast:1.25,maxSide:2800},
+    {name:'lower-band',band:.58,center:.82,contrast:1.25,maxSide:2800},
+    {name:'contrast',band:.62,center:.5,contrast:1.65,maxSide:2600},
+    {name:'threshold',band:.58,center:.5,contrast:1.15,threshold:true,maxSide:2200},
+    {name:'rotated',band:1,center:.5,rotate:90,contrast:1.2,maxSide:2800},
+    {name:'rotated-band',band:.64,center:.5,rotate:90,contrast:1.45,maxSide:2400}
+  ];
+}
+
+async function canvasDataUrl(canvas){
+  try{return canvas.toDataURL('image/png')}catch{return canvas.toDataURL('image/jpeg',.96)}
+}
+
 async function detectCodesFromImageFile(file){
-  let detector=null;
-  try{detector=await createScannerDetector()}catch(error){
-    console.warn('Still-image barcode decoder unavailable:',error);
-    return [];
-  }
-  let item=null;
   const found=[];
+  const push=(value,format='')=>{
+    const v=String(value||'').trim();
+    if(v&&barcodeCandidateValid(v,format)&&!found.includes(v))found.push(v);
+  };
+
+  // Warm independent engines in parallel. Failure of one engine never blocks the others.
+  const [zxingResult,quaggaResult]=await Promise.allSettled([createZXingBarcodeDetector(),ensureQuaggaEngine()]);
+  const zxing=zxingResult.status==='fulfilled'?zxingResult.value:null;
+  const quaggaReady=quaggaResult.status==='fulfilled';
+
+  // 1) Always try the ORIGINAL iPhone/Android photo first. ZXing receives the
+  // encoded file at full resolution, preserving every narrow bar and quiet zone.
+  if(zxing){
+    try{
+      const results=await zxing.detect(file);
+      for(const r of results||[])push(scanRawValue(r),r?.format||'');
+      if(found.length)return found;
+    }catch(error){console.debug('Original barcode photo ZXing pass failed:',error)}
+  }
+
+  let item=null,legacy=null;
   try{
-    const push=vals=>{for(const v of vals||[])if(v&&!found.includes(v))found.push(v)};
-    // First pass uses the original File so ZXing receives the camera's full
-    // encoded resolution. This is especially important for narrow 1D bars.
-    try{push(await detectWithDetector(detector,file))}catch(error){console.debug('Original-file decode failed',error)}
-    if(found.length)return found;
     item=await loadImageElement(file);
-    try{push(await detectWithDetector(detector,item.img))}catch(error){console.debug('Direct image decode failed',error)}
-    if(found.length)return found;
-    for(const opts of [
-      {contrast:false,crop:1},
-      {contrast:true,crop:1},
-      {contrast:false,crop:.82},
-      {contrast:true,crop:.82}
-    ]){
-      const canvas=imagePassCanvas(item.img,opts);
+    const descriptors=barcodeVariantDescriptors();
+    for(let i=0;i<descriptors.length&&!found.length;i++){
+      const desc=descriptors[i];
+      if($('scanStatus')&&!$('scannerModal').classList.contains('hidden')){
+        $('scanStatus').textContent=`Reading barcode… pass ${i+1} of ${descriptors.length}. Keep the complete left/right margins of the barcode visible.`;
+      }
+      const canvas=makeBarcodeVariantCanvas(item.img,desc);
       if(!canvas)continue;
-      try{push(await detectWithDetector(detector,canvas))}catch(error){console.debug('Prepared image decode failed',error)}
-      canvas.width=1;canvas.height=1;
-      if(found.length)break;
+      try{
+        // 2) Quagga2 is specialised for 1D barcode localisation and is the first
+        // decoder on prepared horizontal-band images.
+        if(quaggaReady){
+          const src=await canvasDataUrl(canvas);
+          let qr=await quaggaDecodeDataUrl(src,QUAGGA_ALL_READERS,{locate:true,patchSize:i<3?'large':'x-large',timeoutMs:9000});
+          if(!qr&&i===2){
+            // A locator can occasionally miss a barcode that already fills the
+            // centre band; targeted no-locator passes read scan lines directly.
+            for(const group of QUAGGA_GROUPS){
+              qr=await quaggaDecodeDataUrl(src,group,{locate:false,patchSize:'large',timeoutMs:6000});
+              if(qr)break;
+            }
+          }
+          if(qr)push(qr.rawValue,qr.format);
+        }
+        if(found.length)return found;
+
+        // 3) ZXing again on each lossless/preprocessed pass. This covers DataBar,
+        // GS1-128, ITF-14 and other linear formats not handled by Quagga.
+        if(zxing){
+          try{
+            const results=await zxing.detect(canvas);
+            for(const r of results||[])push(scanRawValue(r),r?.format||'');
+          }catch(error){console.debug('Prepared barcode ZXing pass failed:',error)}
+        }
+        if(found.length)return found;
+
+        // 4) Browser BarcodeDetector/ZBar fallback on the strongest centre passes.
+        if(i<=2||desc.threshold){
+          if(!legacy){try{legacy=await createLegacyDetector()}catch{legacy=null}}
+          if(legacy){
+            try{
+              const results=await legacy.detect(canvas);
+              for(const r of results||[])push(scanRawValue(r),r?.format||'');
+            }catch{}
+          }
+        }
+        if(found.length)return found;
+
+        // 5) Pure-JS decoder fallback (also adds MSI) on the centre/threshold pass.
+        if(i===2||desc.threshold){
+          const results=await detectJSBarcodeReader(canvas);
+          for(const r of results||[])push(scanRawValue(r),r?.format||'');
+          if(found.length)return found;
+        }
+      }finally{
+        try{canvas.width=1;canvas.height=1}catch{}
+      }
       await new Promise(resolve=>setTimeout(resolve,0));
+    }
+
+    // Final compatibility pass: preserve the QR/matrix behavior that worked before.
+    if(!found.length){
+      if(!legacy){try{legacy=await createLegacyDetector()}catch{legacy=null}}
+      if(legacy){
+        try{
+          const results=await legacy.detect(item.img);
+          for(const r of results||[])push(scanRawValue(r),r?.format||'');
+        }catch{}
+      }
     }
     return found;
   }finally{
     if(item?.url)try{URL.revokeObjectURL(item.url)}catch{}
   }
 }
+
 
 function showCapturedScanPhoto(file){
   const root=$('qrReader');
@@ -996,7 +1214,7 @@ function ensureIOSScanCameraInput(){
 
     scanEvidenceFiles=[file];
     showCapturedScanPhoto(file);
-    $('scanStatus').textContent='Photo captured. Reading QR / barcode with universal decoder…';
+    $('scanStatus').textContent='Photo captured. Reading barcode with the barcode-first decoder…';
     let codes=[];
     try{codes=await detectCodesFromImageFile(file)}catch(error){console.error('iPhone captured-image scan failed:',error)}
     if(codes.length){
@@ -1013,7 +1231,7 @@ function ensureIOSScanCameraInput(){
     }
     scannerAutoProceed=false;
     renderScanCodes();
-    $('scanStatus').textContent='Photo captured, but the code was not read automatically. Retake closer/sharper, or enter the code manually and tap Use Code(s) & Verify. This photo is already attached.';
+    $('scanStatus').textContent=`Photo captured, but the barcode was not read automatically. Retake closer/sharper so the bars fill most of the photo width while keeping blank margins on both sides. ${barcodeEngineSummary()} The photo is already attached.`;
   });
   document.body.appendChild(input);
   iosScanCameraInput=input;
@@ -1027,7 +1245,7 @@ function startIOSNativeScanCamera(){
   iosScanCaptureBusy=true;
   scannerAutoProceed=false;
   button.disabled=true;button.textContent='Opening Camera…';
-  $('scanStatus').textContent='Opening iPhone rear camera… take a clear photo with the complete QR / barcode visible.';
+  $('scanStatus').textContent='Opening iPhone rear camera… take a clear photo with the complete barcode visible, including blank margins on both sides.';
   try{
     invokePickerNow(input);
     // Safari returns control after the camera UI closes. A timer only prevents a
@@ -1055,7 +1273,7 @@ $('scanImageInput').onchange=async e=>{
   renderScanCodes();
   $('scanStatus').textContent=found
     ?`${found} new code${found===1?'':'s'} detected. Image evidence attached.`
-    :'Image evidence attached, but no readable QR / barcode was found. Enter the code manually or choose a sharper image.';
+    :'Image evidence attached, but no readable barcode was found. Retake closer/sharper with the entire barcode and blank side margins visible, or enter the code manually.';
 };
 
 $('scanImageBtn').onclick=()=>{
@@ -1107,13 +1325,13 @@ function openScanner(){
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
     if(iosLabel){iosLabel.hidden=false;iosLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='Universal scanner ready (V2 Patch 11). Tap Open Camera & Scan, take a clear photo of the complete symbol, and the same photo will be saved as evidence. Supports QR, Micro QR, rMQR, EAN/UPC, Code 39/93/128, ITF, Codabar, DataBar, Data Matrix, PDF417, Aztec and MSI/Plessey.';
+    $('scanStatus').textContent='Barcode-first scanner ready (V2 Patch 12). Tap Open Camera & Scan. For 1D barcodes, keep every bar plus the blank quiet margins on BOTH sides visible and let the barcode fill most of the photo width. The same photo is saved as evidence. Primary support: Code 128 / GS1-128, Code 39, Code 93, EAN-13/8, UPC-A/E, ITF/ITF-14, Codabar, GS1 DataBar and MSI.';
     // Warm the decoder in the background. This never blocks the native camera.
-    if(navigator.onLine)setTimeout(()=>ensureZXingWasmEngine().catch(error=>console.warn('Universal scanner warm-up failed',error)),0);
+    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureQuaggaEngine()]).then(()=>console.debug(barcodeEngineSummary())),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
     if(iosLabel)iosLabel.hidden=true;
-    $('scanStatus').textContent='Tap Start Camera. Point the rear camera at the QR / barcode; it will be captured automatically.';
+    $('scanStatus').textContent='Tap Start Camera. Keep the complete barcode, including blank margins on both sides, inside the frame.';
   }
 }
 
@@ -1183,7 +1401,7 @@ function handleScannerDecoded(decoded){
 
 function buildScannerVideo(){
   const root=$('qrReader');
-  root.innerHTML=`<div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;"><video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video><div style="position:absolute;left:8%;right:8%;top:20%;bottom:20%;border:3px solid rgba(255,255,255,.98);border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.14);pointer-events:none;"></div><div style="position:absolute;left:0;right:0;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Keep the complete QR / barcode inside the box</div></div>`;
+  root.innerHTML=`<div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;"><video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video><div style="position:absolute;left:5%;right:5%;top:32%;bottom:32%;border:3px solid rgba(255,255,255,.98);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.14);pointer-events:none;"></div><div style="position:absolute;left:6%;right:6%;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Barcode mode: keep all bars + blank margins on both sides inside the box</div></div>`;
   return $('prsMobileScanVideo');
 }
 
@@ -1215,12 +1433,17 @@ function waitForVideoReady(video,timeoutMs=6500){
 function scannerCrop(video,contrast=false){
   const vw=Number(video.videoWidth||0),vh=Number(video.videoHeight||0);if(!vw||!vh)return null;
   if(!scannerCanvas)scannerCanvas=document.createElement('canvas');
-  const cropW=Math.max(1,Math.floor(vw*.72)),cropH=Math.max(1,Math.floor(vh*.72));
-  const sx=Math.floor((vw-cropW)/2),sy=Math.floor((vh-cropH)/2),maxSide=900,scale=Math.min(maxSide/cropW,maxSide/cropH,1.8);
-  const outW=Math.max(320,Math.floor(cropW*scale)),outH=Math.max(320,Math.floor(cropH*scale));
+  // Barcode-first live crop: preserve almost the entire frame WIDTH so Code128,
+  // EAN/UPC, ITF etc. keep their mandatory left/right quiet zones. Only trim
+  // vertically to concentrate decoder work on a horizontal barcode band.
+  const cropW=Math.max(1,Math.floor(vw*.96)),cropH=Math.max(1,Math.floor(vh*.50));
+  const sx=Math.floor((vw-cropW)/2),sy=Math.floor((vh-cropH)/2),maxSide=1500,scale=Math.min(maxSide/cropW,maxSide/cropH,1.45);
+  const outW=Math.max(640,Math.floor(cropW*scale)),outH=Math.max(260,Math.floor(cropH*scale));
   scannerCanvas.width=outW;scannerCanvas.height=outH;
-  const ctx=scannerCanvas.getContext('2d',{willReadFrequently:true});
-  ctx.save();ctx.filter=contrast?'grayscale(1) contrast(1.65)':'none';ctx.drawImage(video,sx,sy,cropW,cropH,0,0,outW,outH);ctx.restore();
+  const ctx=scannerCanvas.getContext('2d',{willReadFrequently:true,alpha:false});
+  if(!ctx)return null;
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,outW,outH);
+  ctx.save();ctx.filter=contrast?'grayscale(1) contrast(1.55)':'none';ctx.drawImage(video,sx,sy,cropW,cropH,0,0,outW,outH);ctx.restore();
   return scannerCanvas;
 }
 
@@ -1234,7 +1457,7 @@ async function scanOneLiveFrame(){
     if(!value&&scannerFrameCount%6===0){const contrastCrop=scannerCrop(video,true);if(contrastCrop)value=await detectWithScannerDetector(contrastCrop)}
     if(value){handleScannerDecoded(value);return}
     const elapsed=(Date.now()-scannerStartedAt)/1000;
-    if(scannerFrameCount%10===0&&!scannerAutoProceed)$('scanStatus').textContent=elapsed>8?'Camera is scanning continuously. Move the QR closer until it fills roughly one-third of the box and hold steady.':`Camera live • scanning… (${scannerFrameCount} frames analysed)`;
+    if(scannerFrameCount%10===0&&!scannerAutoProceed)$('scanStatus').textContent=elapsed>8?'Camera is scanning continuously. Move the barcode closer so the bars fill most of the box width, but keep the blank left/right margins visible.':`Camera live • scanning… (${scannerFrameCount} frames analysed)`;
   }catch(error){console.debug('Mobile barcode frame decode:',error?.name||error?.message||error)}finally{scannerScanBusy=false}
 }
 
@@ -1264,11 +1487,11 @@ async function startScanner(){
     const video=buildScannerVideo();video.srcObject=stream;video.muted=true;video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');
     try{const p=video.play();p?.catch?.(()=>{})}catch{}
     await waitForVideoReady(video);tuneMobileCamera(video).catch(()=>{});
-    scannerRunning=true;scannerStartedAt=Date.now();button.disabled=false;button.textContent='Stop Camera';$('scanStatus').textContent='Camera is live. Preparing universal QR / barcode recognition…';
+    scannerRunning=true;scannerStartedAt=Date.now();button.disabled=false;button.textContent='Stop Camera';$('scanStatus').textContent='Camera is live. Preparing barcode-first recognition…';
     try{scannerDetector=await createScannerDetector()}catch(error){scannerDetector=null;console.error('Scanner decoder failed while camera stayed open:',error)}
     if(!scannerRunning)return;
     if(!scannerDetector){$('scanStatus').textContent='Camera is live but automatic recognition could not load. Enter the code manually and tap Use Code(s) & Verify; the evidence photo will be captured from the live camera.';return}
-    $('scanStatus').textContent=`Universal scanner is live${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the complete QR / barcode steady inside the box.`;scheduleScannerLoop(180);
+    $('scanStatus').textContent=`Barcode-first scanner is live${scannerEngineSource?` (${scannerEngineSource})`:''}. Hold the complete barcode steady inside the box and keep the blank margins on both sides visible.`;scheduleScannerLoop(180);
   }catch(error){
     console.error('Mobile scanner start failed:',error);scannerRunning=false;scannerScanBusy=false;scannerDetector=null;clearTimeout(scannerLoopTimer);scannerLoopTimer=null;
     if(stream?.getTracks)for(const track of stream.getTracks())try{track.stop()}catch{};stopTracksSynchronously();$('qrReader').innerHTML='';button.disabled=false;button.textContent='Start Camera';$('scanStatus').textContent=`Camera scanner could not start. ${cameraErrorMessage(error)}`;

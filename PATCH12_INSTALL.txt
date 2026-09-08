@@ -1,0 +1,44 @@
+PRS.AssetVerify V2 — Patch 12 (Barcode-First)
+===============================================
+
+BASELINE
+- Built from the V2 Patch 11 frontend.
+- Camera workflow remains Patch 10/11 native iPhone capture.
+- Worker / D1 / R2 / company data are NOT changed.
+
+DEPLOY
+1. In repository PRSAV/PRS2, replace ONLY these root files:
+   - app.js
+   - index.html
+   - sw.js
+2. Commit to your patch branch.
+3. Create PR: base=main, compare=your patch branch.
+4. Merge into main.
+5. Wait for GitHub Pages deployment.
+6. On iPhone, close every open PRS tab, reopen Safari and load the site fresh.
+7. Open Scan & Verify. Confirm the message says:
+   "Barcode-first scanner ready (V2 Patch 12)."
+
+FIRST-RUN NOTE
+Patch 12 loads pinned barcode engines from jsDelivr/unpkg on demand and the service
+worker caches successful runtime downloads. Perform the first scan with internet
+access. Subsequent scans can reuse the cached dependencies.
+
+WHAT CHANGED
+- Barcode decoding is now FIRST-PRIORITY; QR remains only as compatibility fallback.
+- ZXing-C++ 3.1.3 is restricted to AllLinear instead of scanning every matrix format.
+- Quagga2 1.12.1 is added as a dedicated 1D barcode locator/decoder.
+- javascript-barcode-reader 1.0.0 is an additional linear fallback and adds MSI.
+- Original full-resolution camera File is decoded before any resizing.
+- Prepared image passes preserve the COMPLETE image width so barcode quiet zones
+  are not cut off.
+- Multiple horizontal bands, contrast, Otsu threshold and 90-degree passes are used.
+- Android live-scanner crop now preserves ~96% of frame width and uses a horizontal
+  barcode box instead of a QR-like centre crop.
+- EAN/UPC candidates are checksum validated before acceptance.
+- If decoding fails, the UI reports ZXing / Quagga2 / JS fallback engine state.
+
+DO NOT
+- Do not upload Patch 9 or Patch 10 add-on JS files.
+- Do not change the Cloudflare Worker for this patch.
+- Do not replace styles.css, manifest.webmanifest, or icon.svg.

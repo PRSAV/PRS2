@@ -1,8 +1,8 @@
-const CACHE = 'prs-assetverify-2-0-11-universal-barcode-engine';
+const CACHE = 'prs-assetverify-2-0-12-barcode-first';
 const CORE = [
   './',
   './index.html',
-  './app.js?v=211',
+  './app.js?v=212',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'
@@ -56,7 +56,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // CDN scanner dependencies may use cache-first after the first successful load.
+  // Barcode decoder CDN dependencies (ZXing / Quagga2 / fallbacks) use cache-first after the first successful load.
   event.respondWith((async () => {
     const cached = await caches.match(request);
     if (cached) {
