@@ -66,6 +66,8 @@ let scannerStartedAt = 0;
 let appendPhotoMode = false;
 let scanCodes = [];
 let scanEvidenceFiles = [];
+let scanMetaByCode = {};        // code value -> { format, symbology, gs1 } from the V3 engine
+let scanLastLatencyMs = 0;
 let auditEvents = [];
 let selectedMemberForPin = null;
 let syncRunning = false;
@@ -511,7 +513,18 @@ $('savePhotoBtn').onclick=async()=>{
 
 // ---------- Scanner auto-fill helpers ----------
 function normalizeScanKey(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]/g,'')}
-function parseScanPayload(raw){
+function parseScanPayload(raw,meta){
+  // V3: delegate to the GS1-aware parser in prs-scan.js. It understands GS1
+  // element strings (GS1-128, GS1 DataMatrix, GS1 QR, GS1 DataBar) in addition
+  // to JSON / URL / key=value, and returns the same {raw,data,structured}
+  // shape this file already consumes. The original parser stays below as a
+  // fallback if prs-scan.js has not loaded.
+  if(window.PRSScan&&typeof window.PRSScan.payloadToData==='function'){
+    try{
+      const out=window.PRSScan.payloadToData(raw,meta||scanMetaByCode[String(raw||'').trim()]||{},{conditions:CONDITIONS,statuses:STATUSES});
+      if(out&&out.data)return out;
+    }catch(error){console.debug('V3 payload parse fell back:',error)}
+  }
   const text=String(raw||'').trim();
   if(!text)return {raw:text,data:{},structured:false};
   try{const parsed=JSON.parse(text);if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))return {raw:text,data:parsed,structured:true}}catch{}
@@ -622,6 +635,9 @@ $('scanVerifyBtn').onclick=()=>openScanner();
 $('closeScannerBtn').onclick=closeScanner;
 $('startScannerBtn').onclick=startScanner;
 $('manualScanCode').addEventListener('input',renderScanCodes);
+$('barcodeTypeSelect').addEventListener('change',async()=>{
+  if(window.PRSScan&&scannerRunning){await stopScanner({preserveStatus:true});await startScanner()}
+});
 $('barcodeTypeSelect')?.addEventListener('change',()=>{if(!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=`${patch14Cfg().label} selected. Capture the complete symbol; partial reads will not be accepted.`});
 
 function loadImageElement(file){
@@ -1799,7 +1815,24 @@ async function patch14DecodeFile(file,mode=patch14Mode()){
 }
 
 // Replace Patch 13's permissive first-hit image routine with strict arbitration.
-async function detectCodesFromImageFile(file){return patch14DecodeFile(file,patch14Mode())}
+async function detectCodesFromImageFile(file){
+  // V3 first: one pass that covers QR, Micro QR, rMQR, DataMatrix, Aztec,
+  // PDF417, MaxiCode, DataBar and every linear format. The Patch 15 pipeline
+  // below still runs for Code 11, MSI, Telepen, Pharmacode and Flattermarken,
+  // which ZXing does not implement.
+  if(window.PRSScan&&typeof window.PRSScan.decodeImage==='function'){
+    try{
+      const mode=patch14Mode();
+      const results=await window.PRSScan.decodeImage(file,mode);
+      const values=(results||[]).map(r=>String(r.value||'').trim()).filter(Boolean);
+      if(values.length){
+        (results||[]).forEach(r=>{const v=String(r.value||'').trim();if(v)scanMetaByCode[v]={format:r.format||'',symbology:r.symbology||'',gs1:!!r.gs1}});
+        return [...new Set(values)];
+      }
+    }catch(error){console.debug('V3 still-image decode fell back:',error)}
+  }
+  return patch14DecodeFile(file,patch14Mode());
+}
 function patch14DetectionSummary(){
   const a=patch14LastDetection?.accepted;
   if(a)return `${patch14Cfg(patch14LastDetection.mode).label} · ${a.engine} · ${a.format||a.family||'linear'} · full-code validated`;
@@ -1939,25 +1972,38 @@ $('useScanCodeBtn').onclick=async()=>{
 
 function openScanner(){
   if(!hasPermission('verification.scan'))return;
-  scanCodes=[];scanEvidenceFiles=[];scannerAutoProceed=false;scannerFrameCount=0;
+  scanCodes=[];scanEvidenceFiles=[];scanMetaByCode={};scannerAutoProceed=false;scannerFrameCount=0;scanLastLatencyMs=0;
   $('manualScanCode').value='';renderScanCodes();$('qrReader').innerHTML='';
   $('scannerModal').classList.remove('hidden');
-  const mobile=isMobileBarcodeDevice();
   const startBtn=$('startScannerBtn');
   const captureLabel=$('iosScanCameraLabel');
+  const engineReady=!!(window.PRSScan&&window.PRSScan.start);
+
+  if(engineReady){
+    // V3 uses one live path on every platform, iPhone included. The still-photo
+    // capture stays available as a fallback for awkward labels.
+    ensureIOSScanCameraInput();
+    startBtn.hidden=false;startBtn.disabled=false;startBtn.textContent='Start Camera';
+    if(captureLabel){captureLabel.hidden=false;captureLabel.textContent='Photo Fallback'}
+    $('scanStatus').textContent='Universal scanner V3 ready — linear, QR and GS1 2D. Tap Start Camera and hold the code in view.';
+    // Warming now means the WASM decoder is already resident when the camera opens.
+    try{window.PRSScan.warm()}catch(error){console.debug('Scanner warm-up skipped:',error)}
+    if(navigator.onLine)setTimeout(()=>{Promise.allSettled([ensureZXingWasmEngine()]).then(()=>console.debug('legacy still-image engines warmed'))},0);
+    return;
+  }
+
+  // prs-scan.js missing: fall back to the Patch 15 still-photo pipeline.
+  const mobile=isMobileBarcodeDevice();
   if(mobile){
-    // Patch 14 deliberately uses the SAME still-photo barcode pipeline on iOS
-    // and Android. A still photo contains the full left/right quiet zones and
-    // prevents a live-frame decoder from accepting only the final digits.
     ensureIOSScanCameraInput();
     startBtn.hidden=true;
     if(captureLabel){captureLabel.hidden=false;captureLabel.textContent='Open Camera & Scan'}
-    $('scanStatus').textContent='Code-11 native scanner ready (V2 Patch 15). Choose Barcode Type, then tap Open Camera & Scan. Auto mode rejects partial suffixes; for uncommon codes select the exact type.';
-    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureSythosEngine()]).then(()=>console.debug('Patch15 engines warmed')),0);
+    $('scanStatus').textContent='Still-photo scanner ready. Choose Barcode Type, then tap Open Camera & Scan.';
+    if(navigator.onLine)setTimeout(()=>Promise.allSettled([ensureZXingWasmEngine(),ensureSythosEngine()]).then(()=>console.debug('engines warmed')),0);
   }else{
     startBtn.hidden=false;startBtn.textContent='Start Camera';startBtn.disabled=false;
     if(captureLabel)captureLabel.hidden=true;
-    $('scanStatus').textContent='Desktop live scanner ready. For difficult 1D codes, use Scan Image and select the exact Barcode Type.';
+    $('scanStatus').textContent='Live scanner ready.';
   }
 }
 
@@ -2000,11 +2046,15 @@ async function captureScannerEvidenceFile(){
 }
 
 function handleScannerDecoded(decoded){
-  const value=String(decoded||'').trim();
+  // V3 hands over an object; older paths still pass a bare string.
+  const detail=(decoded&&typeof decoded==='object')?decoded:{value:decoded};
+  const value=String(detail.value||'').trim();
   if(!value||scannerAutoProceed)return;
+  scanMetaByCode[value]={format:detail.format||'',symbology:detail.symbology||'',gs1:!!detail.gs1};
+  scanLastLatencyMs=Number(detail.latencyMs||0);
   scannerAutoProceed=true;scanCodes=[value];$('manualScanCode').value=value;renderScanCodes();
   try{navigator.vibrate?.(100)}catch{}
-  $('scanStatus').textContent=`Code detected: ${value}. Capturing evidence photo…`;
+  $('scanStatus').textContent=`${detail.format?detail.format+' ':''}code read${scanLastLatencyMs?` in ${scanLastLatencyMs} ms`:''}: ${value}. Capturing evidence photo…`;
   (async()=>{
     try{
       let evidence=null;
@@ -2014,6 +2064,7 @@ function handleScannerDecoded(decoded){
       }
       if(!evidence){
         scannerAutoProceed=false;
+        if(window.PRSScan&&typeof window.PRSScan.resume==='function'){try{window.PRSScan.resume()}catch{}}
         $('scanStatus').textContent=`Code detected: ${value}, but the evidence photo was not captured. Keep the camera open and tap Use Code(s) & Verify to retry.`;
         return;
       }
@@ -2027,7 +2078,20 @@ function handleScannerDecoded(decoded){
 
 function buildScannerVideo(){
   const root=$('qrReader');
-  root.innerHTML=`<div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;"><video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video><div style="position:absolute;left:5%;right:5%;top:32%;bottom:32%;border:3px solid rgba(255,255,255,.98);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.14);pointer-events:none;"></div><div style="position:absolute;left:6%;right:6%;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Barcode mode: keep all bars + blank margins on both sides inside the box</div></div>`;
+  root.innerHTML=`<div style="position:relative;width:100%;min-height:320px;background:#050914;border-radius:14px;overflow:hidden;">`
+    +`<video id="prsMobileScanVideo" playsinline webkit-playsinline autoplay muted style="display:block;width:100%;height:min(66vh,560px);object-fit:cover;background:#050914;"></video>`
+    +`<div style="position:absolute;left:8%;right:8%;top:26%;bottom:26%;border:3px solid rgba(255,255,255,.95);border-radius:16px;box-shadow:0 0 0 9999px rgba(0,0,0,.16);pointer-events:none;"></div>`
+    +`<button type="button" id="scanTorchBtn" hidden style="position:absolute;top:10px;right:10px;z-index:3;border:0;border-radius:999px;padding:9px 14px;font-weight:700;font-size:13px;background:rgba(15,23,42,.78);color:#fff;">Torch</button>`
+    +`<div id="scanLiveBadge" style="position:absolute;top:10px;left:10px;z-index:3;border-radius:999px;padding:6px 12px;font-weight:700;font-size:12px;background:rgba(15,23,42,.78);color:#7dd3fc;">Scanning…</div>`
+    +`<div style="position:absolute;left:6%;right:6%;bottom:12px;text-align:center;color:white;font-size:13px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none;">Hold the whole code inside the box — barcodes need the blank margin at both ends</div>`
+    +`</div>`;
+  const torchBtn=$('scanTorchBtn');
+  if(torchBtn)torchBtn.onclick=async()=>{
+    if(!window.PRSScan)return;
+    const on=torchBtn.dataset.on!=='1';
+    const ok=await window.PRSScan.toggleTorch(on);
+    if(ok){torchBtn.dataset.on=on?'1':'0';torchBtn.textContent=on?'Torch off':'Torch'}
+  };
   return $('prsMobileScanVideo');
 }
 
@@ -2093,6 +2157,40 @@ function scheduleScannerLoop(delay=170){
 }
 
 async function startScanner(){
+  if(window.PRSScan&&typeof window.PRSScan.start==='function'){
+    if(scannerRunning){await stopScanner();return}
+    const button=$('startScannerBtn');
+    button.disabled=true;button.textContent='Opening Camera…';
+    $('scanStatus').textContent='Opening rear camera — allow the Camera permission if prompted.';
+    scannerAutoProceed=false;scannerFrameCount=0;
+    try{
+      const video=buildScannerVideo();
+      await window.PRSScan.start({
+        video,
+        mode:$('barcodeTypeSelect').value||'auto',
+        onDecode:detail=>handleScannerDecoded(detail),
+        onStatus:text=>{$('scanStatus').textContent=text}
+      });
+      scannerRunning=true;scannerStream=window.PRSScan.state.stream;
+      button.disabled=false;button.textContent='Stop Camera';
+      const torchBtn=$('scanTorchBtn');
+      if(torchBtn&&window.PRSScan.torchAvailable())torchBtn.hidden=false;
+      const badge=$('scanLiveBadge');if(badge)badge.textContent='Scanning…';
+      $('scanStatus').textContent='Live scanner running — linear, QR, DataMatrix, PDF417, Aztec and GS1 2D are all active. Hold the code inside the box.';
+    }catch(error){
+      console.error('V3 scanner start failed:',error);
+      scannerRunning=false;
+      try{window.PRSScan.stop()}catch{}
+      $('qrReader').innerHTML='';
+      button.disabled=false;button.textContent='Start Camera';
+      $('scanStatus').textContent=`Camera could not start. ${cameraErrorMessage(error)}`;
+    }
+    return;
+  }
+  return startScannerLegacy();
+}
+
+async function startScannerLegacy(){
   // IMPORTANT: iPhone uses native capture. This call remains fully synchronous
   // until the picker is opened, preserving Safari's required user gesture.
   if(isIOSDevice()){
@@ -2125,10 +2223,15 @@ async function startScanner(){
 }
 
 async function stopScanner(options={}){
-  const button=$('startScannerBtn');clearTimeout(scannerLoopTimer);scannerLoopTimer=null;scannerRunning=false;scannerScanBusy=false;scannerDetector=null;stopTracksSynchronously();
+  const button=$('startScannerBtn');clearTimeout(scannerLoopTimer);scannerLoopTimer=null;scannerRunning=false;scannerScanBusy=false;scannerDetector=null;
+  if(window.PRSScan&&typeof window.PRSScan.stop==='function'){try{window.PRSScan.stop()}catch(error){console.debug('V3 scanner stop:',error)}}
+  stopTracksSynchronously();
   if(scannerCanvas){try{scannerCanvas.width=1;scannerCanvas.height=1}catch{};scannerCanvas=null}
   if(!isIOSDevice())$('qrReader').innerHTML='';
-  if(button){button.disabled=false;button.textContent=isIOSDevice()?'Open Camera & Scan':'Start Camera';button.hidden=isIOSDevice()}const iosLabel=$('iosScanCameraLabel');if(iosLabel){iosLabel.hidden=!isIOSDevice();if(isIOSDevice())iosLabel.textContent='Open Camera & Scan'}
+  const v3=!!(window.PRSScan&&window.PRSScan.start);
+  if(button){button.disabled=false;button.textContent=(v3||!isIOSDevice())?'Start Camera':'Open Camera & Scan';button.hidden=v3?false:isIOSDevice()}
+  const iosLabel=$('iosScanCameraLabel');
+  if(iosLabel){iosLabel.hidden=v3?false:!isIOSDevice();iosLabel.textContent=v3?'Photo Fallback':'Open Camera & Scan'}
   if(!options.preserveStatus&&!$('scannerModal').classList.contains('hidden'))$('scanStatus').textContent=scanCodes.length?`${scanCodes.length} code${scanCodes.length===1?'':'s'} captured.`:(isIOSDevice()?'Tap Open Camera & Scan to capture the tag.':'Camera stopped. Tap Start Camera to scan again.');
 }
 
@@ -2147,7 +2250,7 @@ async function prepareScanRecord(codes,evidenceFiles=[]){
     const photos=await compressFiles(evidence,'scan-image');
     if(!photos.length)throw new Error('Evidence photo could not be prepared');
     const d=new Date(),joined=codes.join(' | '),first=photos[0],captureToken=uid();
-    const parsedCodes=codes.map(parseScanPayload),mapped=scanDynamicValues(parsedCodes),assets=parsedCodes.map(scanPayloadToAsset);
+    const parsedCodes=codes.map(c=>parseScanPayload(c,scanMetaByCode[c])),mapped=scanDynamicValues(parsedCodes),assets=parsedCodes.map(scanPayloadToAsset);
     pendingRecord={captureToken,photos,dataUrl:first.dataUrl,size:photos.reduce((n,p)=>n+p.size,0),source:'scan',capturedAt:d.toISOString(),photoName:first.name||'',scanCode:joined,gps:{latitude:'',longitude:'',accuracy:'',error:'GPS detection is in progress…'}};
     $('detailTitle').textContent=codes.length>1?`Scan & Verify · ${codes.length} codes`:'Scan & Verify Details';renderPendingPhotoPreview();$('scanOnlyPreview').classList.remove('hidden');$('scanOnlyCode').textContent=joined;$('retryAiBtn').classList.add('hidden');
     const filledCount=Object.keys(mapped.sticky).length+Object.keys(mapped.variable).length+assets.reduce((n,a)=>n+[a.assetName,a.serialNumber,a.barcode].filter(Boolean).length,0);

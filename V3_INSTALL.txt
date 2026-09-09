@@ -1,0 +1,47 @@
+PRS.AssetVerify V3 — Universal Live Scanner
+
+BASELINE
+- Built directly on V2 Patch 15.
+- Does not change Worker, D1, R2, records, exports, permissions or CSS.
+- The Patch 15 still-photo pipeline is retained in full and still runs for
+  Code 11, MSI, Telepen, Pharmacode and Flattermarken.
+
+DEPLOY
+Replace these root files in PRSAV/PRS2:
+1. app.js            (modified)
+2. index.html        (modified)
+3. sw.js             (modified)
+Add these two new root files:
+4. prs-scan.js       (new)
+5. scan-worker.js    (new)
+
+All five must sit in the same folder. scan-worker.js is loaded as a Web Worker
+by prs-scan.js using a relative path, so it cannot be moved to a subfolder
+without editing WORKER_URL in prs-scan.js.
+
+Merge to main and wait for the GitHub Pages deployment.
+Close every PRS tab on the phone, then reopen the site.
+The service worker cache name changed to prs-assetverify-3-0-0-universal-scanner,
+so the old cache is discarded automatically on activation.
+
+VERIFY
+Open Scan & Verify. The status line must read:
+  Universal scanner V3 ready — linear, QR and GS1 2D.
+
+Start Camera now appears on iPhone as well as Android and desktop. The old
+still-photo capture is still there, relabelled "Photo Fallback".
+
+WHAT CHANGED, IN SHORT
+- Decoding moved off the main thread into a Web Worker, so the camera preview
+  no longer stutters while a frame is being decoded.
+- The WASM decoder is downloaded and instantiated when the scanner modal opens
+  rather than when the camera starts, removing the cold-start stall.
+- One frame is decoded at a time, driven by requestVideoFrameCallback, so the
+  app never queues stale frames behind a slow one.
+- The live path now requests every symbology ZXing-C++ supports rather than
+  linear formats only. QR, Micro QR, rMQR, Data Matrix, Aztec, PDF417, MaxiCode
+  and GS1 DataBar previously could not be read from the live camera at all.
+- iPhone uses the live camera. Live getUserMedia in Safari is reliable on
+  current iOS; the still-photo detour was the largest single source of delay.
+- GS1 element strings are parsed into their Application Identifiers and written
+  into the matching form fields.

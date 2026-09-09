@@ -1,8 +1,10 @@
-const CACHE = 'prs-assetverify-2-0-15-native-code11';
+const CACHE = 'prs-assetverify-3-0-0-universal-scanner';
 const CORE = [
   './',
   './index.html',
-  './app.js?v=215-code11-native',
+  './app.js?v=300-universal-scanner',
+  './prs-scan.js?v=300',
+  './scan-worker.js?v=300',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg'

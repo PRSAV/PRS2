@@ -350,7 +350,18 @@
     <div class="form-stack">
       <label>Barcode Type
         <select id="barcodeTypeSelect">
-          <option value="auto">Auto — common linear codes</option>
+          <option value="auto">Auto — every supported symbology</option>
+          <optgroup label="2D / matrix">
+          <option value="all2d">All 2D codes</option>
+          <option value="qr">QR Code (incl. Micro QR / rMQR)</option>
+          <option value="datamatrix">Data Matrix (incl. GS1)</option>
+          <option value="pdf417">PDF417</option>
+          <option value="aztec">Aztec</option>
+          </optgroup>
+          <optgroup label="Linear">
+          <option value="ean">EAN / UPC</option>
+          <option value="databar">GS1 DataBar</option>
+          <option value="codabar">Codabar</option>
           <option value="code128">Code 128</option>
           <option value="gs1128">GS1-128 (UCC/EAN-128)</option>
           <option value="code11">Code 11</option>
@@ -363,6 +374,7 @@
           <option value="pharmacode1">Pharmacode One-Track</option>
           <option value="pharmacode2">Pharmacode Two-Track</option>
           <option value="flattermarken">Flattermarken</option>
+          </optgroup>
         </select>
       </label>
       <label>Scanned Code<input id="manualScanCode" placeholder="Scan or enter manually" /></label>
@@ -370,7 +382,7 @@
     </div>
     <div class="grid two"><button id="startScannerBtn" class="primary">Start Camera</button><label id="iosScanCameraLabel" for="prsIOSScanCameraInput" class="primary" hidden role="button" style="align-items:center;justify-content:center;text-align:center;cursor:pointer;min-height:44px;padding:10px 14px;border-radius:10px;">Open Camera &amp; Scan</label><button id="scanImageBtn" class="secondary">Scan Image</button></div>
     <button id="useScanCodeBtn" class="success full">Use Code(s) & Verify</button>
-    <p id="scanStatus" class="field-note"></p><p class="field-note"><strong>Patch 15 · Native Code-11:</strong> Code-11 is decoded directly by PRS using its real start/stop and narrow/wide element grammar. The complete value must be bounded by valid Code-11 start and stop patterns; suffix-only reads are rejected. Other working barcode paths remain unchanged.</p>
+    <p id="scanStatus" class="field-note"></p><p class="field-note"><strong>Scanner V3 · Universal live scanning:</strong> decodes every linear symbology, the full QR family, Data Matrix, Aztec, PDF417, MaxiCode and GS1 DataBar directly from the live camera, plus PRS native Code-11. GS1 element strings are parsed into their Application Identifiers and written straight into the matching fields. Codes without a check character are confirmed on two consecutive reads before being accepted.</p>
   </div></div>
 
   <div id="userModal" class="modal hidden"><div class="modal-sheet small-sheet">
@@ -410,6 +422,7 @@
   </div></div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=215-code11-native"></script>
+  <script src="prs-scan.js?v=300"></script>
+  <script src="app.js?v=300-universal-scanner"></script>
 </body>
 </html>
